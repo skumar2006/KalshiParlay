@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Backend Connection</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 10px 5px;
+            cursor: pointer;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            white-space: pre-wrap;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <h1>Backend Connection Test</h1>
+    
+    <div>
+        <button onclick="testHealth()">Test Health Endpoint</button>
+        <button onclick="testAddBet()">Test Add Bet</button>
+        <button onclick="testGetBets()">Test Get Bets</button>
+    </div>
+    
+    <div id="result"></div>
+    
+    <script>
+        const BACKEND_URL = 'http://localhost:4000';
+        const TEST_USER_ID = 'test_user_' + Date.now();
+        
+        function showResult(success, message, data) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.className = 'result ' + (success ? 'success' : 'error');
+            resultDiv.innerHTML = `<strong>${success ? '✅ SUCCESS' : '❌ ERROR'}</strong>\n\n${message}\n\nData: ${JSON.stringify(data, null, 2)}`;
+        }
+        
+        async function testHealth() {
+            try {
+                const res = await fetch(`${BACKEND_URL}/api/health`);
+                const data = await res.json();
+                showResult(true, 'Health check passed!', data);
+            } catch (err) {
+                showResult(false, 'Health check failed: ' + err.message, { error: err.toString() });
+            }
+        }
+        
+        async function testAddBet() {
+            try {
+                const bet = {
+                    marketId: 'test-market-' + Date.now(),
+                    marketTitle: 'Test Market',
+                    imageUrl: 'https://example.com/image.png',
+                    optionId: 'test-option',
+                    optionLabel: 'Test Option',
+                    prob: 75
+                };
+                
+                const res = await fetch(`${BACKEND_URL}/api/parlay/${TEST_USER_ID}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(bet)
+                });
+                
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+                }
+                
+                const data = await res.json();
+                showResult(true, 'Successfully added bet!', data);
+            } catch (err) {
+                showResult(false, 'Failed to add bet: ' + err.message, { error: err.toString() });
+            }
+        }
+        
+        async function testGetBets() {
+            try {
+                const res = await fetch(`${BACKEND_URL}/api/parlay/${TEST_USER_ID}`);
+                
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+                }
+                
+                const data = await res.json();
+                showResult(true, 'Successfully retrieved bets!', data);
+            } catch (err) {
+                showResult(false, 'Failed to get bets: ' + err.message, { error: err.toString() });
+            }
+        }
+    </script>
+</body>
+</html>
+
+

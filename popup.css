@@ -1,0 +1,715 @@
+.app {
+  width: 360px;
+  padding: 16px 20px 20px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui,
+    sans-serif;
+  background: #f7f7f7;
+  color: #333;
+}
+
+.market-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.market-icon {
+  width: 64px;
+  height: 64px;
+  min-width: 64px;
+  min-height: 64px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #00b894, #0984e3);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.market-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.market-title-container {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.market-label {
+  font-size: 12px;
+  color: #777;
+}
+
+.market-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #333;
+}
+
+.disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+button {
+  cursor: pointer;
+}
+
+.market-options {
+  margin-top: 24px;
+}
+
+.market-options h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.options-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.option-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: #e8e8e8;
+  font-size: 15px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.option-row:hover {
+  background: #d8d8d8;
+}
+
+.option-row.selected {
+  background: #ffffff;
+  border: 2px solid #00b894;
+  padding: 10px 14px;
+}
+
+.option-label {
+  font-weight: 500;
+}
+
+.option-percent {
+  font-weight: 600;
+  color: #00b894;
+}
+
+.add-to-parlay-btn {
+  width: 100%;
+  padding: 14px;
+  margin-top: 16px;
+  background: #e8e8e8;
+  color: #333;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.add-to-parlay-btn:hover:not(:disabled) {
+  background: #d8d8d8;
+}
+
+.add-to-parlay-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.current-parlay {
+  margin-top: 24px;
+}
+
+.current-parlay h2 {
+  margin: 0 0 12px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.parlay-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.empty-parlay {
+  padding: 20px;
+  text-align: center;
+  color: #999;
+  font-size: 14px;
+  background: #ffffff;
+  border-radius: 12px;
+}
+
+.parlay-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: #ffffff;
+  border-radius: 12px;
+  position: relative;
+  transition: all 0.2s ease;
+}
+
+.parlay-item:hover {
+  background: #f8f8f8;
+  transform: translateX(2px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.parlay-item-icon {
+  width: 48px;
+  height: 48px;
+  min-width: 48px;
+  min-height: 48px;
+  border-radius: 12px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.parlay-item-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.parlay-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.parlay-item-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.parlay-item-option {
+  font-size: 12px;
+  color: #666;
+  margin-top: 2px;
+}
+
+.parlay-item-prob {
+  font-size: 15px;
+  font-weight: 600;
+  color: #00b894;
+  flex-shrink: 0;
+}
+
+.parlay-item-delete {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #ff6b6b;
+  color: white;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: bold;
+  transition: background 0.2s;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
+.parlay-item-delete:hover {
+  background: #ff5252;
+}
+
+.parlay-item-delete:active {
+  transform: scale(0.95);
+}
+
+.place-bet-btn {
+  width: 100%;
+  padding: 16px;
+  margin-top: 24px;
+  background: #00b894;
+  color: #ffffff;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.place-bet-btn:hover:not(:disabled) {
+  background: #00a184;
+}
+
+.place-bet-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: #e8e8e8;
+  color: #999;
+}
+
+/* Bet Overlay Modal */
+.bet-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(4px);
+  animation: fadeIn 0.2s ease-out;
+}
+
+.bet-overlay.hidden {
+  display: none;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.bet-modal {
+  background: #f5f5f5;
+  border-radius: 16px;
+  width: 90%;
+  max-width: 400px;
+  max-height: 90vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  animation: slideUp 0.3s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.bet-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px;
+  background: #ffffff;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.bet-modal-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: #333;
+}
+
+.close-overlay-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #e8e8e8;
+  color: #666;
+  border: none;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+
+.close-overlay-btn:hover {
+  background: #d8d8d8;
+  color: #333;
+}
+
+.bet-modal-body {
+  padding: 20px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.parlay-summary {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.parlay-summary h3 {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #333;
+}
+
+.modal-parlay-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.modal-parlay-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #f5f5f5;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.modal-parlay-item-icon {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  border-radius: 8px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.modal-parlay-item-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.modal-parlay-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.modal-parlay-item-title {
+  font-weight: 500;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.modal-parlay-item-option {
+  font-size: 12px;
+  color: #666;
+  margin-top: 2px;
+}
+
+.modal-parlay-item-prob {
+  font-weight: 600;
+  color: #00b894;
+  margin-left: 12px;
+  flex-shrink: 0;
+}
+
+.combined-odds {
+  display: none; /* Hidden - user doesn't need to see combined probability */
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 12px;
+  border-top: 2px solid #e0e0e0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.combined-prob-value {
+  color: #00b894;
+  font-size: 18px;
+}
+
+.stake-input-section {
+  margin-bottom: 20px;
+}
+
+.stake-input-section label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #333;
+}
+
+.stake-input {
+  width: 100%;
+  padding: 14px 16px;
+  border: 2px solid #e0e0e0;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 500;
+  background: #ffffff;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+}
+
+.stake-input:focus {
+  outline: none;
+  border-color: #00b894;
+}
+
+.stake-input::placeholder {
+  color: #999;
+}
+
+.potential-payout {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  background: #ffffff;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.payout-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #00b894;
+}
+
+.bet-modal-footer {
+  padding: 20px;
+  background: #ffffff;
+  border-top: 1px solid #e0e0e0;
+}
+
+.get-quote-btn {
+  width: 100%;
+  padding: 16px;
+  background: #00b894;
+  color: #ffffff;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.get-quote-btn:hover:not(:disabled) {
+  background: #00a184;
+}
+
+.get-quote-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: #e8e8e8;
+  color: #999;
+}
+
+/* Quote Results */
+.quote-results {
+  margin-top: 20px;
+}
+
+.quote-section {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.quote-section h3 {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #333;
+}
+
+.analysis-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.analysis-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.analysis-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #666;
+}
+
+.analysis-value {
+  font-size: 14px;
+  color: #333;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.risk-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  align-self: flex-start;
+}
+
+.risk-low {
+  background: #d4edda;
+  color: #155724;
+}
+
+.risk-medium {
+  background: #fff3cd;
+  color: #856404;
+}
+
+.risk-high {
+  background: #f8d7da;
+  color: #721c24;
+}
+
+.prob-comparison {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px;
+  background: #f8f9fa;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+
+.prob-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.prob-label {
+  font-size: 12px;
+  color: #666;
+}
+
+.prob-value {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.prob-value.naive {
+  color: #999;
+}
+
+.prob-value.adjusted {
+  color: #00b894;
+}
+
+.prob-arrow {
+  font-size: 20px;
+  color: #00b894;
+  font-weight: bold;
+}
+
+.reasoning {
+  font-size: 13px;
+  color: #555;
+  line-height: 1.5;
+  padding: 12px;
+  background: #f8f9fa;
+  border-radius: 8px;
+  border-left: 3px solid #00b894;
+}
+
+.payout-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.payout-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.payout-item.highlight {
+  grid-column: 1 / -1;
+  background: linear-gradient(135deg, #00b894, #00d2a0);
+}
+
+.payout-item.highlight .payout-label,
+.payout-item.highlight .payout-value {
+  color: #ffffff;
+}
+
+.payout-label {
+  font-size: 12px;
+  color: #666;
+  font-weight: 500;
+}
+
+.payout-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: #333;
+}
+
+.payout-value.large {
+  font-size: 24px;
+}
+
+.payout-value.profit {
+  color: #00b894;
+}
+
+.quote-footer {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e0e0e0;
+}
+
+.quote-expiry {
+  font-size: 12px;
+  color: #999;
+  margin: 0 0 8px 0;
+}
+
+.confidence-level {
+  font-size: 13px;
+  color: #666;
+  margin: 0;
+  font-style: italic;
+}
+
+

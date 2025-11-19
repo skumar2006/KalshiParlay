@@ -1,0 +1,158 @@
+Parlay AI Market‑Maker — 1‑Page Data Pipeline Design
+
+1. Purpose
+
+A private research-only parlay engine that uses an AI model to price correlated outcomes, applies strict risk controls, and executes partial hedges on Kalshi. This version focuses almost entirely on the data pipeline + flow, optimized for feeding into Cursor.
+
+2. High‑Level Flow
+
+User Action (Chrome Extension) → selects legs + stake.
+
+API Gateway → validates request + rate limits.
+
+Data Pipeline collects necessary data:
+
+Kalshi market metadata
+
+Orderbook snapshots
+
+Historical prices + volumes
+
+Market correlations
+
+Internal liquidity pool state
+
+Feature Builder transforms raw data into model features.
+
+AI Pricing Model outputs:
+
+ raw probability
+
+Uncertainty (variance or entropy)
+
+Correlation-adjusted probability
+
+Risk Engine modifies the price:
+
+Apply margin based on uncertainty
+
+Check exposure limits + LP capacity
+
+Compute max allowable stake
+
+Quote Service returns final payout + probability.
+
+Bet Placement → stored in ledger.
+
+Hedging Engine executes delta-only hedges (30–40%).
+
+Monitoring + Metrics continuously track PnL + exposures.
+
+3. Data Pipeline (Core Section)
+
+3.1 Inputs Collected
+
+Market Data (Kalshi)
+
+Market states, bid/ask, depth, volume, settlement rules.
+
+Historical Data
+
+Time series of prices, realized vol, correlations.
+
+Event Metadata
+
+Tags, categories, dependencies.
+
+Internal State
+
+Liquidity pool balances
+
+Current liabilities per leg
+
+Pending hedges, fill quality
+
+3.2 Transformations
+
+Normalize market metadata → standardized objects
+
+Build time‑aligned price/volatility windows
+
+Extract pairwise + multi‑leg correlation signals
+
+Compute implied probabilities from Kalshi orderbooks
+
+Build parlay‑specific features: independence test, covariance structure, regime flags
+
+3.3 Feature Outputs
+
+Features for AI model
+
+Exposure vectors for hedging engine
+
+Metrics for risk engine
+
+4. AI Pricing Model
+
+Ensemble of:
+
+Independent model (product of probabilities)
+
+Correlation model (copula/graph)
+
+ML classifier (boosted trees or transformer)
+
+Final price:
+
+
+
+Larger uncertainty → wider margin → safer quotes.
+
+5. Risk Engine (Simple + Hard Rules)
+
+Per-market exposure limits
+
+Per-parlay max stake
+
+LP drawdown guardrail
+
+Rejects quotes when risk > threshold
+
+Outputs:
+
+Allowed max size
+
+Required margin
+
+Final probability / payout
+
+6. Hedging Logic (Delta-Only)
+
+Compute delta vector: sensitivity of parlay to each leg.
+
+Hedge 30–40% of each delta on Kalshi.
+
+Never hedge full payout → avoids paying correlation premium.
+
+7. Storage
+
+Postgres: bets, exposures, LP accounting
+
+Redis: model features, market snapshots, caching
+
+Object storage: historical datasets
+
+8. Monitoring
+
+PnL (realized + unrealized)
+
+Liquidity pool levels
+
+Hedge quality (slippage, fill ratio)
+
+Model drift detection
+
+9. One Sentence Summary
+
+A safe parlay system = clean data → good model → strict limits → partial hedging.
+

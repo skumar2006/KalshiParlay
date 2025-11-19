@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Kalshi Parlay Helper",
+  "description": "Scrapes Kalshi market pages to show the current market in a parlay-style popup.",
+  "version": "0.8.0",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Kalshi Parlay Helper"
+  },
+  "permissions": ["tabs", "activeTab", "storage"],
+  "host_permissions": [
+    "https://kalshi.com/*",
+    "https://www.kalshi.com/*",
+    "http://localhost:4000/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://kalshi.com/*",
+        "https://www.kalshi.com/*"
+      ],
+      "js": ["contentScript.js"],
+      "run_at": "document_end",
+      "all_frames": false
+    }
+  ]
+}
+
+
