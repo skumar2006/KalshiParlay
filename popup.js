@@ -725,6 +725,12 @@ async function init() {
   
   // Always load and show parlay at the end
   await loadAndRenderParlay();
+  
+  // Load parlay history
+  await loadParlayHistory();
+  
+  // Load wallet balance
+  await loadWalletBalance();
 }
 
 // Helper function to load parlay and set up event listeners
@@ -795,6 +801,15 @@ function setupEventListeners() {
     });
     overlay.hasListener = true;
   }
+  
+  // Refresh parlay history button
+  const refreshBtn = document.getElementById("refresh-parlays-btn");
+  if (refreshBtn && !refreshBtn.hasListener) {
+    refreshBtn.addEventListener("click", () => {
+      loadParlayHistory();
+    });
+    refreshBtn.hasListener = true;
+  }
 }
 
 // Helper function to hide market section
@@ -817,6 +832,233 @@ function showMarketSection() {
   if (header) header.style.display = "flex";
   if (options) options.style.display = "block";
   if (addBtn) addBtn.style.display = "block";
+}
+
+// Load and display parlay history
+async function loadParlayHistory() {
+  const container = document.getElementById("parlay-history-container");
+  if (!container) return;
+  
+  try {
+    container.innerHTML = '<div class="loading-parlays">Loading...</div>';
+    
+    const uid = await getUserId(currentEnvironment);
+    const res = await fetch(`${BACKEND_BASE_URL}/api/parlay-history/${uid}`);
+    
+    if (!res.ok) {
+      throw new Error(`Failed to load parlay history: ${res.status}`);
+    }
+    
+    const data = await res.json();
+    const parlays = data.parlays || [];
+    
+    if (parlays.length === 0) {
+      container.innerHTML = '<div class="empty-parlay-history">No parlays yet. Place your first bet!</div>';
+      return;
+    }
+    
+    // Filter by current environment
+    const filteredParlays = parlays.filter(p => {
+      const parlayData = typeof p.parlay_data === 'string' ? JSON.parse(p.parlay_data) : p.parlay_data || [];
+      return parlayData.length > 0 && parlayData[0].environment === currentEnvironment;
+    });
+    
+    if (filteredParlays.length === 0) {
+      container.innerHTML = `<div class="empty-parlay-history">No parlays for ${currentEnvironment} environment yet.</div>`;
+      return;
+    }
+    
+    container.innerHTML = '';
+    
+    filteredParlays.forEach(parlay => {
+      const parlayCard = createParlayHistoryCard(parlay);
+      container.appendChild(parlayCard);
+    });
+    
+  } catch (err) {
+    console.error("Failed to load parlay history:", err);
+    container.innerHTML = '<div class="error-parlay-history">Failed to load parlay history. Please try again.</div>';
+  }
+}
+
+function createParlayHistoryCard(parlay) {
+  const card = document.createElement("div");
+  card.className = "parlay-history-card";
+  
+  const parlayData = typeof parlay.parlay_data === 'string' ? JSON.parse(parlay.parlay_data) : parlay.parlay_data || [];
+  const status = parlay.parlay_status || 'pending';
+  const legOutcomes = parlay.legOutcomes || [];
+  const claimableAmount = parseFloat(parlay.claimable_amount || 0);
+  const claimed = !!parlay.claimed_at;
+  
+  // Status badge
+  const statusBadge = document.createElement("div");
+  statusBadge.className = `parlay-status-badge status-${status}`;
+  statusBadge.textContent = status.toUpperCase();
+  
+  // Header
+  const header = document.createElement("div");
+  header.className = "parlay-history-header";
+  
+  const headerLeft = document.createElement("div");
+  headerLeft.className = "parlay-history-header-left";
+  
+  const date = document.createElement("div");
+  date.className = "parlay-history-date";
+  const completedDate = new Date(parlay.completed_at);
+  date.textContent = completedDate.toLocaleDateString() + ' ' + completedDate.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+  
+  const stake = document.createElement("div");
+  stake.className = "parlay-history-stake";
+  stake.textContent = `Stake: $${parseFloat(parlay.stake).toFixed(2)}`;
+  
+  headerLeft.appendChild(date);
+  headerLeft.appendChild(stake);
+  
+  header.appendChild(headerLeft);
+  header.appendChild(statusBadge);
+  
+  // Legs
+  const legsContainer = document.createElement("div");
+  legsContainer.className = "parlay-history-legs";
+  
+  parlayData.forEach((leg, index) => {
+    const legItem = document.createElement("div");
+    legItem.className = "parlay-history-leg";
+    
+    const legOutcome = legOutcomes.find(o => o.leg_number === index + 1);
+    const legStatus = legOutcome?.outcome || 'pending';
+    const legSettled = legOutcome?.market_status === 'settled';
+    
+    if (legSettled) {
+      legItem.classList.add(`leg-${legStatus}`);
+    } else {
+      legItem.classList.add('leg-pending');
+    }
+    
+    const legIcon = document.createElement("div");
+    legIcon.className = "parlay-history-leg-icon";
+    if (leg.imageUrl) {
+      const img = document.createElement("img");
+      img.src = leg.imageUrl;
+      img.alt = "";
+      legIcon.appendChild(img);
+    }
+    
+    const legInfo = document.createElement("div");
+    legInfo.className = "parlay-history-leg-info";
+    
+    const legTitle = document.createElement("div");
+    legTitle.className = "parlay-history-leg-title";
+    legTitle.textContent = leg.marketTitle;
+    
+    const legOption = document.createElement("div");
+    legOption.className = "parlay-history-leg-option";
+    legOption.textContent = leg.optionLabel;
+    
+    legInfo.appendChild(legTitle);
+    legInfo.appendChild(legOption);
+    
+    const legStatusIcon = document.createElement("div");
+    legStatusIcon.className = "parlay-history-leg-status";
+    if (legSettled) {
+      legStatusIcon.textContent = legStatus === 'win' ? '✓' : '✗';
+      legStatusIcon.classList.add(legStatus === 'win' ? 'status-win' : 'status-loss');
+    } else {
+      legStatusIcon.textContent = '⏳';
+      legStatusIcon.classList.add('status-pending');
+    }
+    
+    legItem.appendChild(legIcon);
+    legItem.appendChild(legInfo);
+    legItem.appendChild(legStatusIcon);
+    
+    legsContainer.appendChild(legItem);
+  });
+  
+  // Footer
+  const footer = document.createElement("div");
+  footer.className = "parlay-history-footer";
+  
+  const payoutInfo = document.createElement("div");
+  payoutInfo.className = "parlay-history-payout";
+  payoutInfo.innerHTML = `
+    <span>Potential Payout:</span>
+    <span class="payout-amount">$${parseFloat(parlay.payout).toFixed(2)}</span>
+  `;
+  
+  footer.appendChild(payoutInfo);
+  
+  // Claim button (if won and not claimed)
+  if (status === 'won' && claimableAmount > 0 && !claimed) {
+    const claimBtn = document.createElement("button");
+    claimBtn.className = "claim-winnings-btn";
+    claimBtn.textContent = `Claim $${claimableAmount.toFixed(2)}`;
+    claimBtn.onclick = () => claimWinnings(parlay.session_id, claimableAmount);
+    footer.appendChild(claimBtn);
+  } else if (status === 'won' && claimed) {
+    const claimedBadge = document.createElement("div");
+    claimedBadge.className = "claimed-badge";
+    claimedBadge.textContent = "✓ Claimed";
+    footer.appendChild(claimedBadge);
+  }
+  
+  // Assemble card
+  card.appendChild(header);
+  card.appendChild(legsContainer);
+  card.appendChild(footer);
+  
+  return card;
+}
+
+async function claimWinnings(sessionId, amount) {
+  if (!confirm(`Claim $${amount.toFixed(2)} in winnings?`)) {
+    return;
+  }
+  
+  try {
+    const res = await fetch(`${BACKEND_BASE_URL}/api/claim-winnings/${sessionId}`, {
+      method: 'POST'
+    });
+    
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.error || `Failed to claim: ${res.status}`);
+    }
+    
+    const data = await res.json();
+    alert(`Success! $${amount.toFixed(2)} has been added to your account balance.`);
+    
+    // Reload parlay history
+    await loadParlayHistory();
+    
+    // Reload wallet balance if there's a wallet display
+    await loadWalletBalance();
+    
+  } catch (err) {
+    console.error("Failed to claim winnings:", err);
+    alert(`Failed to claim winnings: ${err.message}`);
+  }
+}
+
+async function loadWalletBalance() {
+  try {
+    const uid = await getUserId(currentEnvironment);
+    const res = await fetch(`${BACKEND_BASE_URL}/api/wallet/${uid}`);
+    
+    if (res.ok) {
+      const data = await res.json();
+      const balance = parseFloat(data.balance || 0);
+      
+      // Update wallet display if it exists
+      const walletDisplay = document.getElementById("wallet-balance");
+      if (walletDisplay) {
+        walletDisplay.textContent = `$${balance.toFixed(2)}`;
+      }
+    }
+  } catch (err) {
+    console.error("Failed to load wallet balance:", err);
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);

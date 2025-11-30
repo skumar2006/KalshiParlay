@@ -18,8 +18,19 @@ import {
   updatePaymentStatus,
   saveCompletedPurchase,
   markHedgeExecuted,
-  getUserPurchaseHistory
+  getUserPurchaseHistory,
+  updateParlayBetOutcome,
+  updateParlayStatus,
+  getActiveParlays,
+  claimParlayWinnings,
+  getParlayBetOutcomes,
+  getUserWallet,
+  addUserBalance,
+  createWithdrawalRequest,
+  updateWithdrawalStatus,
+  getWithdrawalRequests
 } from "./db.js";
+import { checkParlayStatus, checkAllActiveParlays } from "./parlayStatusService.js";
 import { generateParlayQuote } from "./aiQuoteService.js";
 import { calculateHedgingStrategy } from "./hedgingService.js";
 import { executeHedgingStrategy } from "./kalshiTradeClient.js";
@@ -516,6 +527,237 @@ app.get("/api/purchase-history/:userId", async (req, res) => {
 });
 
 /**
+ * Check status of a specific parlay
+ * @route GET /api/parlay-status/:sessionId
+ */
+app.get("/api/parlay-status/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  
+  try {
+    const status = await checkParlayStatus(sessionId);
+    res.json({ success: true, ...status });
+  } catch (err) {
+    logError("Error checking parlay status", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to check parlay status", 
+      details: err.message 
+    });
+  }
+});
+
+/**
+ * Claim winnings for a won parlay (adds to wallet balance)
+ * @route POST /api/claim-winnings/:sessionId
+ */
+app.post("/api/claim-winnings/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  
+  if (!stripe) {
+    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Payment processing not available" 
+    });
+  }
+  
+  try {
+    const purchase = await getCompletedPurchase(sessionId);
+    
+    if (!purchase) {
+      return res.status(HTTP_STATUS.NOT_FOUND).json({ 
+        error: "Parlay not found" 
+      });
+    }
+    
+    if (purchase.parlay_status !== 'won') {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+        error: "Parlay has not won or is not yet settled" 
+      });
+    }
+    
+    if (purchase.claimed_at) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+        error: "Winnings already claimed" 
+      });
+    }
+    
+    // Mark as claimed first (idempotent)
+    await claimParlayWinnings(sessionId);
+    
+    // Add to user's wallet balance
+    await addUserBalance(purchase.user_id, purchase.claimable_amount);
+    
+    logInfo(`Winnings claimed: User ${purchase.user_id}, Amount: $${purchase.claimable_amount}, Session: ${sessionId}`);
+    
+    res.json({ 
+      success: true, 
+      message: "Winnings added to your account balance",
+      amount: purchase.claimable_amount
+    });
+  } catch (err) {
+    logError("Error claiming winnings", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to claim winnings", 
+      details: err.message 
+    });
+  }
+});
+
+/**
+ * Get user's parlay history with status
+ * @route GET /api/parlay-history/:userId
+ */
+app.get("/api/parlay-history/:userId", async (req, res) => {
+  const { userId } = req.params;
+  
+  try {
+    const purchases = await getUserPurchaseHistory(userId);
+    
+    // Enrich with leg outcomes
+    const enriched = await Promise.all(purchases.map(async (purchase) => {
+      const outcomes = await getParlayBetOutcomes(purchase.id);
+      const parlayData = typeof purchase.parlay_data === 'string' 
+        ? JSON.parse(purchase.parlay_data) 
+        : purchase.parlay_data || [];
+      
+      return {
+        ...purchase,
+        parlay_data: parlayData,
+        parlay_status: purchase.parlay_status || 'pending',
+        claimable_amount: parseFloat(purchase.claimable_amount || 0),
+        claimed_at: purchase.claimed_at,
+        legOutcomes: outcomes
+      };
+    }));
+    
+    res.json({ success: true, parlays: enriched });
+  } catch (err) {
+    logError("Error fetching parlay history", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to fetch parlay history", 
+      details: err.message 
+    });
+  }
+});
+
+/**
+ * Get user wallet balance
+ * @route GET /api/wallet/:userId
+ */
+app.get("/api/wallet/:userId", async (req, res) => {
+  const { userId } = req.params;
+  
+  try {
+    const wallet = await getUserWallet(userId);
+    res.json({ 
+      success: true, 
+      balance: parseFloat(wallet.balance || 0) 
+    });
+  } catch (err) {
+    logError("Error fetching wallet", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to fetch wallet", 
+      details: err.message 
+    });
+  }
+});
+
+/**
+ * Request withdrawal (Stripe payout)
+ * @route POST /api/withdraw/:userId
+ */
+app.post("/api/withdraw/:userId", async (req, res) => {
+  const { userId } = req.params;
+  const { amount, bankAccountId } = req.body; // bankAccountId from Stripe Customer
+  
+  if (!stripe) {
+    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Payment processing not available" 
+    });
+  }
+  
+  if (!amount || amount <= 0) {
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+      error: "Invalid withdrawal amount" 
+    });
+  }
+  
+  if (!bankAccountId) {
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+      error: "Bank account ID required" 
+    });
+  }
+  
+  try {
+    const wallet = await getUserWallet(userId);
+    const balance = parseFloat(wallet.balance || 0);
+    
+    if (amount > balance) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+        error: "Insufficient balance" 
+      });
+    }
+    
+    // Create Stripe payout
+    const payout = await stripe.payouts.create({
+      amount: Math.round(amount * 100), // Convert to cents
+      currency: 'usd',
+      method: 'standard', // or 'instant' (fees apply)
+      destination: bankAccountId,
+      metadata: {
+        user_id: userId,
+        type: 'parlay_winnings'
+      }
+    });
+    
+    // Create withdrawal request record
+    const withdrawal = await createWithdrawalRequest(
+      userId,
+      amount,
+      'stripe',
+      payout.id
+    );
+    
+    // Deduct from wallet balance
+    await addUserBalance(userId, -amount);
+    
+    logInfo(`Withdrawal requested: User ${userId}, Amount: $${amount}, Payout ID: ${payout.id}`);
+    
+    res.json({ 
+      success: true, 
+      withdrawal_id: withdrawal.id,
+      payout_id: payout.id,
+      amount: amount,
+      estimated_arrival: payout.arrival_date,
+      message: `Withdrawal initiated. Funds will arrive by ${new Date(payout.arrival_date * 1000).toLocaleDateString()}`
+    });
+  } catch (err) {
+    logError("Error processing withdrawal", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to process withdrawal", 
+      details: err.message 
+    });
+  }
+});
+
+/**
+ * Get withdrawal history
+ * @route GET /api/withdrawals/:userId
+ */
+app.get("/api/withdrawals/:userId", async (req, res) => {
+  const { userId } = req.params;
+  
+  try {
+    const withdrawals = await getWithdrawalRequests(userId);
+    res.json({ success: true, withdrawals });
+  } catch (err) {
+    logError("Error fetching withdrawals", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to fetch withdrawals", 
+      details: err.message 
+    });
+  }
+});
+
+/**
  * Generate AI-powered quote for a parlay
  * @route POST /api/quote
  * @param {Array} bets - Array of bet objects
@@ -801,6 +1043,24 @@ app.get("/payment-cancel", (req, res) => {
     </html>
   `);
 });
+
+// Start parlay status checker (runs every 15 minutes)
+const STATUS_CHECK_INTERVAL = 15 * 60 * 1000; // 15 minutes
+
+// Run immediately on startup
+checkAllActiveParlays().catch(err => {
+  logError("Error in initial parlay status check", err);
+});
+
+// Then run periodically
+setInterval(() => {
+  logInfo("Running scheduled parlay status check...");
+  checkAllActiveParlays().catch(err => {
+    logError("Error in scheduled parlay status check", err);
+  });
+}, STATUS_CHECK_INTERVAL);
+
+logInfo(`Parlay status checker started (interval: ${STATUS_CHECK_INTERVAL / 1000}s)`);
 
 app.listen(PORT, () => {
   logInfo(`Kalshi backend listening on http://localhost:${PORT}`);

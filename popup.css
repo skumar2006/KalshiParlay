@@ -712,4 +712,265 @@ button {
   font-style: italic;
 }
 
+/* My Parlays Section */
+.my-parlays-section {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 2px solid #e0e0e0;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.section-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.refresh-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #e8e8e8;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  transition: background 0.2s;
+}
+
+.refresh-btn:hover {
+  background: #d8d8d8;
+}
+
+.parlay-history-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.loading-parlays,
+.empty-parlay-history,
+.error-parlay-history {
+  padding: 20px;
+  text-align: center;
+  color: #999;
+  font-size: 14px;
+  background: #ffffff;
+  border-radius: 12px;
+}
+
+.error-parlay-history {
+  color: #e74c3c;
+}
+
+.parlay-history-card {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 16px;
+  border: 1px solid #e0e0e0;
+}
+
+.parlay-history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.parlay-history-header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.parlay-history-date {
+  font-size: 12px;
+  color: #666;
+}
+
+.parlay-history-stake {
+  font-size: 14px;
+  font-weight: 600;
+  color: #333;
+}
+
+.parlay-status-badge {
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.status-pending {
+  background: #fff3cd;
+  color: #856404;
+}
+
+.status-won {
+  background: #d4edda;
+  color: #155724;
+}
+
+.status-lost {
+  background: #f8d7da;
+  color: #721c24;
+}
+
+.parlay-history-legs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.parlay-history-leg {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.parlay-history-leg.leg-win {
+  background: #d4edda;
+  border-left: 3px solid #28a745;
+}
+
+.parlay-history-leg.leg-loss {
+  background: #f8d7da;
+  border-left: 3px solid #dc3545;
+}
+
+.parlay-history-leg.leg-pending {
+  background: #fff3cd;
+  border-left: 3px solid #ffc107;
+}
+
+.parlay-history-leg-icon {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.parlay-history-leg-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.parlay-history-leg-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.parlay-history-leg-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.parlay-history-leg-option {
+  font-size: 11px;
+  color: #666;
+  margin-top: 2px;
+}
+
+.parlay-history-leg-status {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.parlay-history-leg-status.status-win {
+  background: #28a745;
+  color: white;
+}
+
+.parlay-history-leg-status.status-loss {
+  background: #dc3545;
+  color: white;
+}
+
+.parlay-history-leg-status.status-pending {
+  background: #ffc107;
+  color: #333;
+}
+
+.parlay-history-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 12px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.parlay-history-payout {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.parlay-history-payout span:first-child {
+  font-size: 12px;
+  color: #666;
+}
+
+.payout-amount {
+  font-size: 16px;
+  font-weight: 700;
+  color: #00b894;
+}
+
+.claim-winnings-btn {
+  padding: 8px 16px;
+  background: #00b894;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.claim-winnings-btn:hover {
+  background: #00a184;
+}
+
+.claimed-badge {
+  padding: 8px 16px;
+  background: #d4edda;
+  color: #155724;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
 

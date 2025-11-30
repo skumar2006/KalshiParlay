@@ -137,6 +137,79 @@ export async function initializeDatabase() {
       CREATE INDEX IF NOT EXISTS idx_completed_purchases_session_id ON completed_purchases(session_id);
     `);
     
+    // Add parlay status columns to completed_purchases
+    try {
+      await client.query(`
+        ALTER TABLE completed_purchases 
+        ADD COLUMN IF NOT EXISTS parlay_status VARCHAR(50) DEFAULT 'pending';
+      `);
+      await client.query(`
+        ALTER TABLE completed_purchases 
+        ADD COLUMN IF NOT EXISTS claimable_amount DECIMAL(10, 2) DEFAULT 0;
+      `);
+      await client.query(`
+        ALTER TABLE completed_purchases 
+        ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP;
+      `);
+      await client.query(`
+        ALTER TABLE completed_purchases 
+        ADD COLUMN IF NOT EXISTS last_status_check TIMESTAMP;
+      `);
+      logInfo('Parlay status columns added/verified');
+    } catch (err) {
+      if (!err.message.includes('already exists')) {
+        logError('Warning adding parlay status columns', err);
+      }
+    }
+    
+    // Create parlay_bet_outcomes table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS parlay_bet_outcomes (
+        id SERIAL PRIMARY KEY,
+        purchase_id INTEGER NOT NULL REFERENCES completed_purchases(id) ON DELETE CASCADE,
+        leg_number INTEGER NOT NULL,
+        ticker VARCHAR(255) NOT NULL,
+        option_id VARCHAR(255) NOT NULL,
+        market_status VARCHAR(50) DEFAULT 'open',
+        outcome VARCHAR(50),
+        settlement_price DECIMAL(5, 2),
+        checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        settled_at TIMESTAMP,
+        UNIQUE(purchase_id, leg_number)
+      );
+    `);
+    
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_parlay_bet_outcomes_purchase_id ON parlay_bet_outcomes(purchase_id);
+    `);
+    
+    // Create user_wallet table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_wallet (
+        user_id VARCHAR(255) PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+        balance DECIMAL(10, 2) DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    
+    // Create withdrawal_requests table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS withdrawal_requests (
+        id SERIAL PRIMARY KEY,
+        user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        amount DECIMAL(10, 2) NOT NULL,
+        status VARCHAR(50) DEFAULT 'pending',
+        payment_method VARCHAR(50),
+        stripe_payout_id VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP
+      );
+    `);
+    
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_user_id ON withdrawal_requests(user_id);
+    `);
+    
     logInfo('Database initialized successfully');
   } catch (err) {
     logError('Error initializing database', err);
@@ -450,13 +523,210 @@ export async function getUserPurchaseHistory(userId) {
   
   try {
     const result = await client.query(
-      `SELECT id, session_id, stake, payout, parlay_data, completed_at, hedge_executed
+      `SELECT id, session_id, stake, payout, parlay_data, completed_at, hedge_executed, parlay_status, claimable_amount, claimed_at
        FROM completed_purchases
        WHERE user_id = $1
        ORDER BY completed_at DESC`,
       [userId]
     );
     
+    return result.rows;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Update outcome for a specific leg of a parlay
+ */
+export async function updateParlayBetOutcome(purchaseId, legNumber, ticker, optionId, marketStatus, outcome, settlementPrice) {
+  const client = await pool.connect();
+  
+  try {
+    await client.query(`
+      INSERT INTO parlay_bet_outcomes 
+      (purchase_id, leg_number, ticker, option_id, market_status, outcome, settlement_price, checked_at, settled_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, $8)
+      ON CONFLICT (purchase_id, leg_number) 
+      DO UPDATE SET
+        market_status = $5,
+        outcome = $6,
+        settlement_price = $7,
+        checked_at = CURRENT_TIMESTAMP,
+        settled_at = CASE WHEN $5 = 'settled' AND settled_at IS NULL THEN CURRENT_TIMESTAMP ELSE settled_at END
+    `, [purchaseId, legNumber, ticker, optionId, marketStatus, outcome, settlementPrice, 
+        marketStatus === 'settled' ? new Date() : null]);
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Update overall parlay status
+ */
+export async function updateParlayStatus(sessionId, status, claimableAmount) {
+  const client = await pool.connect();
+  
+  try {
+    await client.query(`
+      UPDATE completed_purchases 
+      SET parlay_status = $1, 
+          claimable_amount = $2,
+          last_status_check = CURRENT_TIMESTAMP
+      WHERE session_id = $3
+    `, [status, claimableAmount, sessionId]);
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Get active parlays (not fully settled)
+ */
+export async function getActiveParlays() {
+  const client = await pool.connect();
+  
+  try {
+    const result = await client.query(`
+      SELECT * FROM completed_purchases
+      WHERE parlay_status IN ('pending', 'won')
+      ORDER BY completed_at DESC
+    `);
+    return result.rows;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Mark parlay as claimed
+ */
+export async function claimParlayWinnings(sessionId) {
+  const client = await pool.connect();
+  
+  try {
+    await client.query(`
+      UPDATE completed_purchases 
+      SET claimed_at = CURRENT_TIMESTAMP
+      WHERE session_id = $1 AND parlay_status = 'won' AND claimed_at IS NULL
+    `, [sessionId]);
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Get leg outcomes for a parlay
+ */
+export async function getParlayBetOutcomes(purchaseId) {
+  const client = await pool.connect();
+  
+  try {
+    const result = await client.query(`
+      SELECT * FROM parlay_bet_outcomes
+      WHERE purchase_id = $1
+      ORDER BY leg_number ASC
+    `, [purchaseId]);
+    return result.rows;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Get or create user wallet
+ */
+export async function getUserWallet(userId) {
+  const client = await pool.connect();
+  
+  try {
+    const result = await client.query(`
+      INSERT INTO user_wallet (user_id, balance)
+      VALUES ($1, 0)
+      ON CONFLICT (user_id) DO NOTHING
+      RETURNING *
+    `, [userId]);
+    
+    if (result.rows.length === 0) {
+      const existing = await client.query(
+        'SELECT * FROM user_wallet WHERE user_id = $1',
+        [userId]
+      );
+      return existing.rows[0] || { user_id: userId, balance: 0 };
+    }
+    
+    return result.rows[0];
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Add balance to user wallet
+ */
+export async function addUserBalance(userId, amount) {
+  const client = await pool.connect();
+  
+  try {
+    await client.query(`
+      INSERT INTO user_wallet (user_id, balance)
+      VALUES ($1, $2)
+      ON CONFLICT (user_id) 
+      DO UPDATE SET balance = user_wallet.balance + $2, updated_at = CURRENT_TIMESTAMP
+    `, [userId, amount]);
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Create withdrawal request
+ */
+export async function createWithdrawalRequest(userId, amount, paymentMethod, stripePayoutId = null) {
+  const client = await pool.connect();
+  
+  try {
+    const result = await client.query(`
+      INSERT INTO withdrawal_requests (user_id, amount, payment_method, stripe_payout_id, status)
+      VALUES ($1, $2, $3, $4, 'pending')
+      RETURNING *
+    `, [userId, amount, paymentMethod, stripePayoutId]);
+    
+    return result.rows[0];
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Update withdrawal request status
+ */
+export async function updateWithdrawalStatus(withdrawalId, status, stripePayoutId = null) {
+  const client = await pool.connect();
+  
+  try {
+    await client.query(`
+      UPDATE withdrawal_requests 
+      SET status = $1, stripe_payout_id = COALESCE($2, stripe_payout_id), completed_at = CASE WHEN $1 = 'completed' THEN CURRENT_TIMESTAMP ELSE completed_at END
+      WHERE id = $3
+    `, [status, stripePayoutId, withdrawalId]);
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Get withdrawal requests for a user
+ */
+export async function getWithdrawalRequests(userId) {
+  const client = await pool.connect();
+  
+  try {
+    const result = await client.query(`
+      SELECT * FROM withdrawal_requests
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+    `, [userId]);
     return result.rows;
   } finally {
     client.release();

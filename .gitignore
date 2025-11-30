@@ -48,3 +48,4 @@ keys/
 # Database
 *.db
 *.sqlite
+*.md
