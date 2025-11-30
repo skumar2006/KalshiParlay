@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Chrome extension for scraping Kalshi markets and building parlays.",
   "private": true,
+  "type": "module",
   "scripts": {
     "start": "node server/index.js",
     "dev": "nodemon server/index.js"

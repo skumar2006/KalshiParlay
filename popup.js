@@ -1,26 +1,34 @@
+/**
+ * Popup Script
+ * Main frontend logic for the Chrome extension popup
+ */
+
+// Import constants (Note: Chrome extensions don't support ES modules in content scripts)
+// Using inline constants for now
 const BACKEND_BASE_URL = "http://localhost:4000";
+const MIN_BETS_FOR_PARLAY = 2;
 
 // Global state
 let currentMarket = null;
 let selectedOption = null;
 let parlayBets = [];
 let userId = null;
+let currentEnvironment = 'production'; // 'demo' or 'production'
 
-// Generate or retrieve userId from chrome.storage
-async function getUserId() {
-  if (userId) return userId;
+// Generate or retrieve userId from chrome.storage (environment-specific)
+async function getUserId(environment = 'production') {
+  const storageKey = `userId_${environment}`;
   
-  const result = await chrome.storage.local.get(['userId']);
+  const result = await chrome.storage.local.get([storageKey]);
   
-  if (result.userId) {
-    userId = result.userId;
+  if (result[storageKey]) {
+    return result[storageKey];
   } else {
-    // Generate a new unique ID
-    userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-    await chrome.storage.local.set({ userId });
+    // Generate a new unique ID for this environment
+    const newUserId = `user_${environment}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    await chrome.storage.local.set({ [storageKey]: newUserId });
+    return newUserId;
   }
-  
-  return userId;
 }
 
 async function getActiveTab() {
@@ -28,16 +36,40 @@ async function getActiveTab() {
   return tabs[0];
 }
 
+/**
+ * Detect if URL is a Kalshi market page (production or demo)
+ * @param {string} url - URL to check
+ * @returns {boolean} True if it's a Kalshi market URL
+ */
 function isKalshiMarketUrl(url) {
   if (!url) return false;
   try {
     const u = new URL(url);
-    return (
-      (u.host === "kalshi.com" || u.host === "www.kalshi.com") &&
-      u.pathname.startsWith("/markets")
-    );
+    const isKalshiDomain = 
+      u.host === "kalshi.com" || 
+      u.host === "www.kalshi.com" ||
+      u.host === "demo.kalshi.co";
+    return isKalshiDomain && u.pathname.startsWith("/markets");
   } catch (e) {
     return false;
+  }
+}
+
+/**
+ * Detect which Kalshi environment (demo or production)
+ * @param {string} url - URL to check
+ * @returns {string} 'demo' or 'production'
+ */
+function getKalshiEnvironment(url) {
+  if (!url) return 'production';
+  try {
+    const u = new URL(url);
+    if (u.host === "demo.kalshi.co") {
+      return 'demo';
+    }
+    return 'production';
+  } catch (e) {
+    return 'production';
   }
 }
 
@@ -219,9 +251,9 @@ function renderParlay() {
   // Enable/disable "Place Your Bet" button based on bet count
   const placeBtn = document.getElementById("place-bet-btn");
   if (placeBtn) {
-    if (parlayBets.length < 2) {
+    if (parlayBets.length < MIN_BETS_FOR_PARLAY) {
       placeBtn.disabled = true;
-      placeBtn.title = "Add at least 2 bets to place a parlay";
+      placeBtn.title = `Add at least ${MIN_BETS_FOR_PARLAY} bets to place a parlay`;
     } else {
       placeBtn.disabled = false;
       placeBtn.title = "Place your parlay bet";
@@ -239,8 +271,11 @@ function openMarketPage(marketId) {
     // Use the stored URL to navigate directly
     chrome.tabs.create({ url: bet.marketUrl });
   } else {
-    // Fallback: use search on Kalshi with the market ID
-    const searchUrl = `https://kalshi.com/markets?q=${encodeURIComponent(marketId)}`;
+    // Fallback: use search on Kalshi with the market ID (use correct environment)
+    const baseUrl = currentEnvironment === 'demo' 
+      ? 'https://demo.kalshi.co' 
+      : 'https://kalshi.com';
+    const searchUrl = `${baseUrl}/markets?q=${encodeURIComponent(marketId)}`;
     chrome.tabs.create({ url: searchUrl });
   }
 }
@@ -249,7 +284,7 @@ async function removeBetFromParlay(betId) {
   if (!betId) return;
   
   try {
-    const uid = await getUserId();
+    const uid = await getUserId(currentEnvironment);
     const res = await fetch(`${BACKEND_BASE_URL}/api/parlay/${uid}/${betId}`, {
       method: 'DELETE'
     });
@@ -274,13 +309,22 @@ async function removeBetFromParlay(betId) {
 async function addToParlay() {
   if (!selectedOption || !currentMarket) return;
   
-  // Check if already in parlay
+  // Check if already in parlay (only check bets from current environment)
   const alreadyAdded = parlayBets.some(bet => 
-    bet.marketId === currentMarket.id && bet.optionId === selectedOption.id
+    bet.marketId === currentMarket.id && 
+    bet.optionId === selectedOption.id &&
+    bet.environment === currentEnvironment
   );
   
   if (alreadyAdded) {
     alert("This bet is already in your parlay!");
+    return;
+  }
+  
+  // Prevent mixing demo and production bets
+  if (parlayBets.length > 0 && parlayBets[0].environment !== currentEnvironment) {
+    const otherEnv = parlayBets[0].environment === 'demo' ? 'demo' : 'production';
+    alert(`Cannot mix bets from different environments!\n\nYou have bets from ${otherEnv} environment.\nPlease clear your parlay or switch to the ${otherEnv} site.`);
     return;
   }
   
@@ -296,11 +340,12 @@ async function addToParlay() {
     optionId: selectedOption.id,
     optionLabel: selectedOption.label,
     prob: selectedOption.prob,
-    ticker: selectedOption.ticker || selectedOption.id || null // Kalshi ticker for API trading
+    ticker: selectedOption.ticker || selectedOption.id || null, // Kalshi ticker for API trading
+    environment: currentEnvironment // Store environment with bet
   };
   
   try {
-    const uid = await getUserId();
+    const uid = await getUserId(currentEnvironment);
     const res = await fetch(`${BACKEND_BASE_URL}/api/parlay/${uid}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -517,7 +562,7 @@ async function getQuote() {
 async function placeParlayOrder(quote) {
   try {
     // Get user ID
-    const uid = await getUserId();
+    const uid = await getUserId(currentEnvironment);
     
     console.log("[Payment] Creating Stripe checkout session...");
     
@@ -527,8 +572,9 @@ async function placeParlayOrder(quote) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         userId: uid,
+        environment: currentEnvironment, // Include environment
         stake: quote.stake,
-        parlayBets: parlayBets,
+        parlayBets: parlayBets.map(bet => ({ ...bet, environment: currentEnvironment })),
         quote: quote
       })
     });
@@ -558,8 +604,8 @@ async function placeBet() {
   if (parlayBets.length === 0) return;
   
   // Require at least 2 bets for a parlay
-  if (parlayBets.length < 2) {
-    alert("You need at least 2 bets to place a parlay!");
+  if (parlayBets.length < MIN_BETS_FOR_PARLAY) {
+    alert(`You need at least ${MIN_BETS_FOR_PARLAY} bets to place a parlay!`);
     return;
   }
   
@@ -578,6 +624,10 @@ async function init() {
   }
 
   console.log("Current tab URL:", tab.url);
+
+  // Detect environment (demo or production)
+  currentEnvironment = getKalshiEnvironment(tab.url);
+  console.log(`Detected environment: ${currentEnvironment}`);
 
   // Check if it's a Kalshi market page
   if (!isKalshiMarketUrl(tab.url)) {
@@ -679,15 +729,17 @@ async function init() {
 
 // Helper function to load parlay and set up event listeners
 async function loadAndRenderParlay() {
-  // Load parlay bets from database
+  // Load parlay bets from database (filter by current environment)
   try {
-    const uid = await getUserId();
-    const res = await fetch(`${BACKEND_BASE_URL}/api/parlay/${uid}`);
+    const uid = await getUserId(currentEnvironment);
+    const res = await fetch(`${BACKEND_BASE_URL}/api/parlay/${uid}?environment=${currentEnvironment}`);
     
     if (res.ok) {
       const data = await res.json();
-      parlayBets = data.bets || [];
-      console.log("Loaded parlay bets:", parlayBets);
+      // Filter bets to only show those from current environment
+      const allBets = data.bets || [];
+      parlayBets = allBets.filter(bet => bet.environment === currentEnvironment);
+      console.log(`Loaded ${parlayBets.length} parlay bets for ${currentEnvironment} environment:`, parlayBets);
     }
   } catch (err) {
     console.error("Failed to load parlay bets:", err);

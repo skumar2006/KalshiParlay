@@ -4,13 +4,24 @@ import dotenv from "dotenv";
 // Ensure .env is loaded before we read process.env in this module.
 dotenv.config();
 
-const KALSHI_API_BASE_URL =
-  process.env.KALSHI_API_BASE_URL || "https://api.elections.kalshi.com/trade-api/v2";
+// Use demo environment for market data fetching
+const USE_DEMO = true;
+const KALSHI_DEMO_API_BASE = "https://demo-api.kalshi.co/trade-api/v2";
+const KALSHI_PROD_API_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
-if (!process.env.KALSHI_API_KEY) {
+const KALSHI_API_BASE_URL =
+  process.env.KALSHI_API_BASE_URL || (USE_DEMO ? KALSHI_DEMO_API_BASE : KALSHI_PROD_API_BASE);
+
+// Use demo API key for demo environment
+const API_KEY = USE_DEMO 
+  ? process.env.KALSHI_DEMO_API_KEY || process.env.KALSHI_API_KEY
+  : process.env.KALSHI_API_KEY;
+
+if (!API_KEY) {
+  const envVar = USE_DEMO ? 'KALSHI_DEMO_API_KEY' : 'KALSHI_API_KEY';
   // eslint-disable-next-line no-console
   console.warn(
-    "[kalshiClient] KALSHI_API_KEY is not set. Requests to Kalshi will fail."
+    `[kalshiClient] ${envVar} is not set. Requests to Kalshi will fail.`
   );
 }
 
@@ -20,7 +31,7 @@ async function kalshiRequest(path) {
   const res = await fetch(url, {
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.KALSHI_API_KEY || ""}`,
+      Authorization: `Bearer ${API_KEY || ""}`,
     },
   });
 

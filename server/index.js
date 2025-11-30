@@ -1,8 +1,12 @@
+/**
+ * Main Server Entry Point
+ * Express server for Kalshi Parlay Helper API
+ */
+
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 import Stripe from "stripe";
-import { getMarketById, getMarketOrderbook } from "./kalshiClient.js";
+import { getMarketById } from "./kalshiClient.js";
 import { 
   initializeDatabase, 
   getParlayBets, 
@@ -13,41 +17,146 @@ import {
   getPendingPayment,
   updatePaymentStatus,
   saveCompletedPurchase,
-  getCompletedPurchase,
   markHedgeExecuted,
   getUserPurchaseHistory
 } from "./db.js";
 import { generateParlayQuote } from "./aiQuoteService.js";
 import { calculateHedgingStrategy } from "./hedgingService.js";
 import { executeHedgingStrategy } from "./kalshiTradeClient.js";
+import { ENV, validateEnvironment } from "../config/env.js";
+import { CONFIG, ERROR_MESSAGES, HTTP_STATUS } from "../config/constants.js";
+import { logError, logInfo, logSection, logWarn, logDebug } from "./utils/logger.js";
 
-dotenv.config();
+// Validate environment variables on startup
+try {
+  validateEnvironment();
+} catch (err) {
+  logError("Environment validation failed", err);
+  process.exit(1);
+}
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = ENV.PORT || CONFIG.SERVER.DEFAULT_PORT;
 
-// Initialize Stripe
-const stripe = new Stripe(process.env.STRIPE_API_KEY);
+// Initialize Stripe (optional - only if API key is provided)
+let stripe = null;
+if (ENV.STRIPE_API_KEY) {
+  stripe = new Stripe(ENV.STRIPE_API_KEY);
+} else {
+  logWarn("Stripe API key not provided - payment features will be disabled");
+}
 
 app.use(cors()); // For dev: allow all origins (including the extension)
 
-// Stripe webhook needs raw body, so we'll handle it separately
+/**
+ * Enrich hedge bets with tickers from parlay data
+ * Matches hedge bets to parlay bets by leg number or market/option
+ * 
+ * @param {Array} hedgeBets - Array of hedge bet objects from hedging strategy
+ * @param {Array} parlayData - Array of parlay bet objects from database
+ * @returns {Array} Enriched hedge bets with tickers
+ */
+function enrichHedgeBetsWithTickers(hedgeBets, parlayData) {
+  console.log(`\n🔍 ENRICHING HEDGE BETS WITH TICKERS:`);
+  console.log(`   Hedge bets to enrich: ${hedgeBets.length}`);
+  console.log(`   Parlay data entries: ${parlayData.length}`);
+  
+  const enriched = hedgeBets.map((hedgeBet, index) => {
+    // If ticker already exists, keep it
+    if (hedgeBet.ticker) {
+      console.log(`   ✅ Leg ${hedgeBet.leg}: Already has ticker ${hedgeBet.ticker}`);
+      return hedgeBet;
+    }
+    
+    // Try to find matching parlay bet by leg number (1-indexed)
+    const legIndex = hedgeBet.leg - 1;
+    const parlayBet = parlayData[legIndex];
+    
+    if (parlayBet && parlayBet.ticker) {
+      console.log(`   ✅ Leg ${hedgeBet.leg}: Found ticker by index: ${parlayBet.ticker}`);
+      return {
+        ...hedgeBet,
+        ticker: parlayBet.ticker
+      };
+    }
+    
+    // Fallback: try to match by market title and option label
+    const match = parlayData.find(bet => {
+      const marketMatch = bet.marketTitle === hedgeBet.market || 
+                         bet.marketTitle?.includes(hedgeBet.market) ||
+                         hedgeBet.market?.includes(bet.marketTitle);
+      const optionMatch = bet.optionLabel === hedgeBet.option ||
+                         bet.optionLabel?.toLowerCase() === hedgeBet.option?.toLowerCase();
+      return marketMatch && optionMatch;
+    });
+    
+    if (match && match.ticker) {
+      console.log(`   ✅ Leg ${hedgeBet.leg}: Found ticker by matching: ${match.ticker}`);
+      return {
+        ...hedgeBet,
+        ticker: match.ticker
+      };
+    }
+    
+    // Last resort: try to match by marketId if available
+    if (hedgeBet.marketId) {
+      const marketMatch = parlayData.find(bet => bet.marketId === hedgeBet.marketId);
+      if (marketMatch && marketMatch.ticker) {
+        console.log(`   ✅ Leg ${hedgeBet.leg}: Found ticker by marketId: ${marketMatch.ticker}`);
+        return {
+          ...hedgeBet,
+          ticker: marketMatch.ticker
+        };
+      }
+    }
+    
+    console.log(`   ❌ Leg ${hedgeBet.leg}: NO TICKER FOUND`);
+    console.log(`      Market: ${hedgeBet.market}`);
+    console.log(`      Option: ${hedgeBet.option}`);
+    console.log(`      MarketId: ${hedgeBet.marketId || 'N/A'}`);
+    return hedgeBet;
+  });
+  
+  return enriched;
+}
+
+/**
+ * Stripe webhook endpoint
+ * Handles payment completion events and executes hedging strategies
+ * Note: Uses raw body parser for webhook signature verification
+ */
 app.post('/api/webhook', express.raw({type: 'application/json'}), async (req, res) => {
+  if (!stripe) {
+    logError("Stripe webhook received but Stripe is not initialized");
+    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Payment processing not available" 
+    });
+  }
+
+  logSection("WEBHOOK RECEIVED");
+  logInfo(`Timestamp: ${new Date().toISOString()}`);
+  logInfo(`Method: ${req.method}`);
+  logInfo(`Path: ${req.path}`);
+  
   const sig = req.headers['stripe-signature'];
   
   let event;
   
   try {
     // Verify webhook signature (in production, use STRIPE_WEBHOOK_SECRET)
-    if (process.env.STRIPE_WEBHOOK_SECRET) {
-      event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    if (ENV.STRIPE_WEBHOOK_SECRET) {
+      logInfo("Using webhook secret verification");
+      event = stripe.webhooks.constructEvent(req.body, sig, ENV.STRIPE_WEBHOOK_SECRET);
     } else {
       // For development without webhook signing
+      logWarn("No webhook secret - parsing JSON directly (dev mode)");
       event = JSON.parse(req.body.toString());
     }
+    
+    logInfo(`Event parsed successfully - Type: ${event.type}, ID: ${event.id}`);
   } catch (err) {
-    console.error(`⚠️  Webhook signature verification failed: ${err.message}`);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    logError("Webhook error", err);
+    return res.status(HTTP_STATUS.BAD_REQUEST).send(`Webhook Error: ${err.message}`);
   }
   
   // Handle the event
@@ -56,46 +165,31 @@ app.post('/api/webhook', express.raw({type: 'application/json'}), async (req, re
       const session = event.data.object;
       const stripeAmount = session.amount_total / 100;
       
-      console.log("\n" + "=".repeat(80));
-      console.log("💳 STRIPE PAYMENT CONFIRMED");
-      console.log("=".repeat(80));
-      console.log(`\n✅ Session ID: ${session.id}`);
-      console.log(`💰 Amount paid: $${stripeAmount.toFixed(2)}`);
-      console.log(`📧 Customer email: ${session.customer_details?.email || 'N/A'}`);
+      logSection("STRIPE PAYMENT CONFIRMED");
+      logInfo(`Session ID: ${session.id}`);
+      logInfo(`Amount paid: $${stripeAmount.toFixed(2)}`);
+      logInfo(`Customer email: ${session.customer_details?.email || 'N/A'}`);
       
       // Get payment details from database
       try {
         const payment = await getPendingPayment(session.id);
         
         if (!payment) {
-          console.error(`\n❌ ERROR: Payment record not found in database`);
-          console.error(`   Session ID: ${session.id}`);
-          console.log("\n" + "=".repeat(80) + "\n");
+          logError(`Payment record not found in database - Session ID: ${session.id}`);
           break;
         }
         
-        console.log(`\n📊 PURCHASE DETAILS:`);
-        console.log(`   User ID: ${payment.user_id}`);
-        console.log(`   Stake: $${payment.stake}`);
-        console.log(`   Number of legs: ${payment.parlay_data.length}`);
-        
-        console.log(`\n🎯 PARLAY BETS:`);
-        payment.parlay_data.forEach((bet, i) => {
-          console.log(`   ${i + 1}. ${bet.marketTitle}`);
-          console.log(`      Option: ${bet.optionLabel} (${bet.prob}%)`);
-        });
+        logInfo(`Purchase Details - User ID: ${payment.user_id}, Stake: $${payment.stake}, Legs: ${payment.parlay_data.length}`);
         
         // Extract quote data
         const quoteData = payment.quote_data || {};
         const payout = quoteData.payout ? parseFloat(quoteData.payout.adjustedPayout) : 0;
         
-        console.log(`\n💵 PAYOUT INFO:`);
-        console.log(`   Promised payout if wins: $${payout.toFixed(2)}`);
-        console.log(`   Potential profit: $${(payout - payment.stake).toFixed(2)}`);
+        logInfo(`Payout Info - Promised payout: $${payout.toFixed(2)}, Potential profit: $${(payout - payment.stake).toFixed(2)}`);
         
         // Update pending payment status
         await updatePaymentStatus(session.id, 'completed');
-        console.log(`\n✅ Updated pending payment status to 'completed'`);
+        logInfo("Updated pending payment status to 'completed'");
         
         // Save to completed purchases
         const completedPurchase = await saveCompletedPurchase(
@@ -109,22 +203,60 @@ app.post('/api/webhook', express.raw({type: 'application/json'}), async (req, re
           stripeAmount
         );
         
-        console.log(`\n✅ Saved to completed_purchases (ID: ${completedPurchase.id})`);
+        logInfo(`Saved to completed_purchases (ID: ${completedPurchase.id})`);
         
         // Execute hedging strategy
         const hedgingStrategy = quoteData.hedgingStrategy;
         
+        // Debug: Log parlay probabilities to understand hedging decision
+        if (payment.parlay_data && payment.parlay_data.length > 0) {
+          logInfo("Parlay leg probabilities:");
+          payment.parlay_data.forEach((bet, i) => {
+            logInfo(`  Leg ${i + 1}: ${bet.marketTitle} - ${bet.optionLabel} (${bet.prob}%)`);
+          });
+        }
+        
+        if (hedgingStrategy) {
+          logInfo(`Hedging strategy decision: needsHedging=${hedgingStrategy.needsHedging}`);
+          logInfo(`Hedging reasoning: ${hedgingStrategy.reasoning || 'N/A'}`);
+          if (hedgingStrategy.hedgeBets) {
+            logInfo(`Number of hedge bets: ${hedgingStrategy.hedgeBets.length}`);
+          }
+        } else {
+          logWarn("No hedging strategy found in quote data");
+        }
+        
         if (hedgingStrategy && hedgingStrategy.needsHedging) {
-          console.log(`\n🛡️ EXECUTING HEDGING STRATEGY:`);
-          console.log(`   Strategy: ${hedgingStrategy.strategy || 'variance_reduction'}`);
+          logSection("EXECUTING HEDGING STRATEGY");
+          logInfo(`Strategy: ${hedgingStrategy.strategy || 'variance_reduction'}`);
           
           if (hedgingStrategy.hedgeBets && hedgingStrategy.hedgeBets.length > 0) {
-            console.log(`   Number of hedge bets: ${hedgingStrategy.hedgeBets.length}`);
-            console.log(`   Total hedge cost: $${hedgingStrategy.totalHedgeCost.toFixed(2)}`);
+            logInfo(`Number of hedge bets: ${hedgingStrategy.hedgeBets.length}`);
+            logInfo(`Total hedge cost: $${hedgingStrategy.totalHedgeCost.toFixed(2)}`);
+            
+            // Enrich hedge bets with tickers from parlay_data
+            logInfo("Enriching hedge bets with tickers...");
+            const enrichedHedgeBets = enrichHedgeBetsWithTickers(
+              hedgingStrategy.hedgeBets,
+              payment.parlay_data
+            );
+            
+            // Validate all tickers are present
+            const missingTickers = enrichedHedgeBets.filter(bet => !bet.ticker);
+            
+            if (missingTickers.length > 0) {
+              logError(`${missingTickers.length} hedge bets missing tickers`, missingTickers);
+              logWarn(`Proceeding with partial hedging (${enrichedHedgeBets.length - missingTickers.length}/${enrichedHedgeBets.length} bets)`);
+            } else {
+              logInfo(`All ${enrichedHedgeBets.length} hedge bets have tickers`);
+            }
             
             // Execute hedging strategy through Kalshi API
+            logInfo(`Executing orders on Kalshi demo environment...`);
+            logInfo(`DRY_RUN: ${ENV.KALSHI_DRY_RUN ? 'ENABLED (TESTING)' : 'DISABLED (REAL ORDERS)'}`);
+            
             const hedgeResult = await executeHedgingStrategy(
-              hedgingStrategy.hedgeBets,
+              enrichedHedgeBets,
               {
                 userId: payment.user_id,
                 sessionId: session.id,
@@ -133,58 +265,45 @@ app.post('/api/webhook', express.raw({type: 'application/json'}), async (req, re
               }
             );
             
+            logInfo(`Hedging execution results - Total: ${hedgeResult.totalOrders}, Successful: ${hedgeResult.successful}, Failed: ${hedgeResult.failed}`);
+            
             if (hedgeResult.success) {
-              console.log(`\n   ✅ Hedging execution completed!`);
-              console.log(`   ${hedgeResult.successful}/${hedgeResult.totalOrders} orders placed successfully`);
-              
-              // Mark as executed in database
+              logInfo(`Hedging execution completed successfully!`);
               await markHedgeExecuted(session.id);
-              console.log(`   ✅ Marked hedge as executed in database`);
             } else {
-              console.log(`\n   ⚠️  Hedging execution had issues:`);
-              console.log(`   ${hedgeResult.successful}/${hedgeResult.totalOrders} orders succeeded`);
-              console.log(`   ${hedgeResult.failed}/${hedgeResult.totalOrders} orders failed`);
-              
-              // Still mark as attempted
+              logWarn(`Hedging execution had issues - ${hedgeResult.successful}/${hedgeResult.totalOrders} succeeded`);
               await markHedgeExecuted(session.id);
-              console.log(`   ℹ️  Marked hedge attempt in database`);
             }
           } else {
-            console.log(`   ℹ️  No individual hedge bets needed`);
+            logInfo("No individual hedge bets needed");
           }
         } else {
-          console.log(`\n✅ NO HEDGING NEEDED`);
-          console.log(`   Reason: ${hedgingStrategy?.reasoning || 'Low-probability parlay, acceptable variance'}`);
+          logInfo(`NO HEDGING NEEDED - Reason: ${hedgingStrategy?.reasoning || 'Low-probability parlay, acceptable variance'}`);
         }
         
         // Clear user's parlay (they've placed their bet)
         await clearParlayBets(payment.user_id);
-        console.log(`\n✅ Cleared user's parlay bets from active parlays`);
+        logInfo("Cleared user's parlay bets from active parlays");
         
-        console.log(`\n🎉 PAYMENT PROCESSING COMPLETE`);
-        console.log(`   User can now track their bet`);
-        console.log(`   Hedging strategy logged and ready for execution`);
+        logInfo("PAYMENT PROCESSING COMPLETE");
         
       } catch (err) {
-        console.error(`\n❌ ERROR PROCESSING PAYMENT:`);
-        console.error(`   ${err.message}`);
-        console.error(err.stack);
+        logError("Error processing payment", err);
       }
       
-      console.log("\n" + "=".repeat(80) + "\n");
       break;
     }
     case 'checkout.session.expired':
-      console.log(`⏱️  Checkout session expired: ${event.data.object.id}`);
+      logInfo(`Checkout session expired: ${event.data.object.id}`);
       break;
     case 'payment_intent.succeeded':
-      console.log(`💰 PaymentIntent succeeded: ${event.data.object.id}`);
+      logInfo(`PaymentIntent succeeded: ${event.data.object.id}`);
       break;
     case 'payment_intent.payment_failed':
-      console.log(`❌ Payment failed: ${event.data.object.id}`);
+      logError(`Payment failed: ${event.data.object.id}`);
       break;
     default:
-      console.log(`Unhandled event type: ${event.type}`);
+      logWarn(`Unhandled event type: ${event.type}`);
   }
   
   // Return a response to acknowledge receipt of the event
@@ -196,23 +315,31 @@ app.use(express.json());
 
 // Initialize database on startup
 initializeDatabase().catch(err => {
-  console.error('[Server] Failed to initialize database:', err);
+  logError("Failed to initialize database", err);
+  process.exit(1);
 });
 
 /**
- * Health check
+ * Health check endpoint
+ * @route GET /api/health
  */
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true });
+app.get(CONFIG.SERVER.HEALTH_CHECK_PATH, (_req, res) => {
+  res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
 /**
- * GET /api/kalshi/market/:id
- *
- * Returns a simplified view of a Kalshi market for the extension:
- * - title
- * - image URL (if available)
- * - list of contracts/options with prices and approximate probabilities
+ * Test webhook endpoint (for debugging)
+ */
+app.get("/api/webhook/test", (_req, res) => {
+  console.log("✅ Webhook endpoint is accessible");
+  res.json({ message: "Webhook endpoint is working", timestamp: new Date().toISOString() });
+});
+
+/**
+ * Get market data from Kalshi API
+ * @route GET /api/kalshi/market/:id
+ * @param {string} id - Market identifier/ticker
+ * @returns {Object} Market data with title, contracts, and options
  */
 app.get("/api/kalshi/market/:id", async (req, res) => {
   const marketId = req.params.id;
@@ -224,7 +351,9 @@ app.get("/api/kalshi/market/:id", async (req, res) => {
     const markets = data.markets || [];
     
     if (markets.length === 0) {
-      return res.status(404).json({ error: "Market not found" });
+      return res.status(HTTP_STATUS.NOT_FOUND).json({ 
+        error: ERROR_MESSAGES.KALSHI.MARKET_NOT_FOUND 
+      });
     }
 
     // Use the first market's title (they're all the same event)
@@ -265,57 +394,69 @@ app.get("/api/kalshi/market/:id", async (req, res) => {
       raw: { markets },
     });
   } catch (err) {
-    console.error("Error in /api/kalshi/market/:id", err);
-    res
-      .status(500)
-      .json({ error: "Failed to fetch market data from Kalshi", details: `${err}` });
+    logError("Error fetching market data from Kalshi", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: ERROR_MESSAGES.KALSHI.MARKET_NOT_FOUND, 
+      details: err.message 
+    });
   }
 });
 
 /**
- * GET /api/parlay/:userId
- * 
- * Get all parlay bets for a user
+ * Get all parlay bets for a user (optionally filtered by environment)
+ * @route GET /api/parlay/:userId
+ * @param {string} userId - User identifier
+ * @param {string} environment - Optional query parameter to filter by environment ('demo' or 'production')
+ * @returns {Object} Object containing array of bets
  */
 app.get("/api/parlay/:userId", async (req, res) => {
   const { userId } = req.params;
+  const { environment } = req.query; // Get environment from query params
   
   try {
-    const bets = await getParlayBets(userId);
+    const bets = await getParlayBets(userId, environment || null);
     res.json({ bets });
   } catch (err) {
-    console.error("Error in GET /api/parlay/:userId", err);
-    res.status(500).json({ error: "Failed to fetch parlay bets", details: `${err}` });
+    logError("Error fetching parlay bets", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to fetch parlay bets", 
+      details: err.message 
+    });
   }
 });
 
 /**
- * POST /api/parlay/:userId
- * 
  * Add a bet to the user's parlay
- * Body: { marketId, marketTitle, imageUrl, optionId, optionLabel, prob }
+ * @route POST /api/parlay/:userId
+ * @param {string} userId - User identifier
+ * @param {Object} bet - Bet object with marketId, marketTitle, imageUrl, optionId, optionLabel, prob
+ * @returns {Object} Created bet object
  */
 app.post("/api/parlay/:userId", async (req, res) => {
   const { userId } = req.params;
   const bet = req.body;
   
-  console.log('[POST /api/parlay] Received bet:', JSON.stringify(bet, null, 2));
+  logDebug(`Received bet for user ${userId}`, bet);
   
   try {
     const newBet = await addParlayBet(userId, bet);
-    console.log('[POST /api/parlay] Successfully added bet:', newBet.id);
+    logInfo(`Successfully added bet: ${newBet.id}`);
     res.json({ bet: newBet });
   } catch (err) {
-    console.error("[POST /api/parlay] Error adding bet:", err);
-    console.error("[POST /api/parlay] Error stack:", err.stack);
-    res.status(500).json({ error: "Failed to add bet to parlay", details: err.message });
+    logError("Error adding bet to parlay", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to add bet to parlay", 
+      details: err.message 
+    });
   }
 });
 
 /**
- * DELETE /api/parlay/:userId/:betId
- * 
  * Remove a bet from the user's parlay
+ * @route DELETE /api/parlay/:userId/:betId
+ * @param {string} userId - User identifier
+ * @param {string} betId - Bet ID to remove
+ * @returns {Object} Success status
  */
 app.delete("/api/parlay/:userId/:betId", async (req, res) => {
   const { userId, betId } = req.params;
@@ -324,15 +465,19 @@ app.delete("/api/parlay/:userId/:betId", async (req, res) => {
     await removeParlayBet(userId, betId);
     res.json({ success: true });
   } catch (err) {
-    console.error("Error in DELETE /api/parlay/:userId/:betId", err);
-    res.status(500).json({ error: "Failed to remove bet from parlay", details: `${err}` });
+    logError("Error removing bet from parlay", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to remove bet from parlay", 
+      details: err.message 
+    });
   }
 });
 
 /**
- * DELETE /api/parlay/:userId
- * 
  * Clear all bets from the user's parlay
+ * @route DELETE /api/parlay/:userId
+ * @param {string} userId - User identifier
+ * @returns {Object} Success status
  */
 app.delete("/api/parlay/:userId", async (req, res) => {
   const { userId } = req.params;
@@ -341,15 +486,19 @@ app.delete("/api/parlay/:userId", async (req, res) => {
     await clearParlayBets(userId);
     res.json({ success: true });
   } catch (err) {
-    console.error("Error in DELETE /api/parlay/:userId", err);
-    res.status(500).json({ error: "Failed to clear parlay", details: `${err}` });
+    logError("Error clearing parlay", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to clear parlay", 
+      details: err.message 
+    });
   }
 });
 
 /**
- * GET /api/purchase-history/:userId
- * 
  * Get completed purchase history for a user
+ * @route GET /api/purchase-history/:userId
+ * @param {string} userId - User identifier
+ * @returns {Object} Object containing array of purchases
  */
 app.get("/api/purchase-history/:userId", async (req, res) => {
   const { userId } = req.params;
@@ -358,30 +507,40 @@ app.get("/api/purchase-history/:userId", async (req, res) => {
     const purchases = await getUserPurchaseHistory(userId);
     res.json({ success: true, purchases });
   } catch (err) {
-    console.error("Error fetching purchase history:", err);
-    res.status(500).json({ error: "Failed to fetch purchase history", details: err.message });
+    logError("Error fetching purchase history", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to fetch purchase history", 
+      details: err.message 
+    });
   }
 });
 
 /**
- * POST /api/quote
- * 
  * Generate AI-powered quote for a parlay
- * Body: { bets: [...], stake: number }
+ * @route POST /api/quote
+ * @param {Array} bets - Array of bet objects
+ * @param {number} stake - Stake amount in dollars
+ * @returns {Object} Quote with analysis and payout information
  */
 app.post("/api/quote", async (req, res) => {
   const { bets, stake } = req.body;
   
   if (!bets || !Array.isArray(bets) || bets.length === 0) {
-    return res.status(400).json({ error: "Bets array is required" });
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+      error: ERROR_MESSAGES.PARLAY.INVALID_BETS 
+    });
   }
   
   if (!stake || stake <= 0) {
-    return res.status(400).json({ error: "Valid stake amount is required" });
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+      error: ERROR_MESSAGES.PARLAY.INVALID_STAKE 
+    });
   }
   
   try {
-    console.log(`[Quote] Generating AI quote for ${bets.length} bets with $${stake} stake`);
+    const requestId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    logInfo(`Generating AI quote for ${bets.length} bets with $${stake} stake (Request ID: ${requestId})`);
+    
     const result = await generateParlayQuote(bets, stake);
     
     // Calculate hedging strategy (logged to console only)
@@ -404,33 +563,48 @@ app.post("/api/quote", async (req, res) => {
     
     res.json(result);
   } catch (err) {
-    console.error("Error generating quote:", err);
-    res.status(500).json({ 
-      error: "Failed to generate quote", 
+    logError("Error generating quote", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: ERROR_MESSAGES.PAYMENT.QUOTE_FAILED, 
       details: err.message 
     });
   }
 });
 
 /**
- * POST /api/create-checkout-session
- * 
  * Create a Stripe Checkout session for payment
- * Body: { userId, stake, parlayBets, quote }
+ * @route POST /api/create-checkout-session
+ * @param {string} userId - User identifier
+ * @param {number} stake - Stake amount
+ * @param {Array} parlayBets - Array of parlay bet objects
+ * @param {Object} quote - Quote data from AI service
+ * @returns {Object} Checkout session ID and URL
  */
 app.post("/api/create-checkout-session", async (req, res) => {
+  if (!stripe) {
+    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Payment processing not available" 
+    });
+  }
+
   const { userId, stake, parlayBets, quote } = req.body;
   
   if (!userId) {
-    return res.status(400).json({ error: "User ID is required" });
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+      error: ERROR_MESSAGES.PAYMENT.USER_ID_REQUIRED 
+    });
   }
   
   if (!stake || stake <= 0) {
-    return res.status(400).json({ error: "Valid stake amount is required" });
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+      error: ERROR_MESSAGES.PARLAY.INVALID_STAKE 
+    });
   }
   
   if (!parlayBets || !Array.isArray(parlayBets) || parlayBets.length === 0) {
-    return res.status(400).json({ error: "Parlay bets are required" });
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+      error: ERROR_MESSAGES.PARLAY.INVALID_BETS 
+    });
   }
   
   try {
@@ -443,11 +617,11 @@ app.post("/api/create-checkout-session", async (req, res) => {
       ? parlayDescription.substring(0, 497) + '...'
       : parlayDescription;
     
-    console.log(`[Stripe] Creating checkout session for user ${userId}, stake: $${stake}`);
+    logInfo(`Creating checkout session for user ${userId}, stake: $${stake}`);
     
     // Create Stripe Checkout Session with minimal metadata
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
+      payment_method_types: CONFIG.STRIPE.PAYMENT_METHOD_TYPES,
       line_items: [
         {
           price_data: {
@@ -462,7 +636,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
           quantity: 1,
         },
       ],
-      mode: 'payment',
+      mode: CONFIG.STRIPE.PAYMENT_MODE,
       success_url: `http://localhost:${PORT}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `http://localhost:${PORT}/payment-cancel`,
       metadata: {
@@ -472,20 +646,20 @@ app.post("/api/create-checkout-session", async (req, res) => {
       },
     });
     
-    console.log(`✅ Checkout session created: ${session.id}`);
+    logInfo(`Checkout session created: ${session.id}`);
     
     // Save full payment details to database (avoids 500-char metadata limit)
     await savePendingPayment(session.id, userId, stake, parlayBets, quote);
-    console.log(`✅ Payment details saved to database`);
+    logInfo("Payment details saved to database");
     
     res.json({ 
       sessionId: session.id,
       checkoutUrl: session.url 
     });
   } catch (err) {
-    console.error("Error creating checkout session:", err);
-    res.status(500).json({ 
-      error: "Failed to create checkout session", 
+    logError("Error creating checkout session", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: ERROR_MESSAGES.PAYMENT.CHECKOUT_FAILED, 
       details: err.message 
     });
   }
@@ -629,8 +803,11 @@ app.get("/payment-cancel", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  // eslint-disable-next-line no-console
-  console.log(`Kalshi backend listening on http://localhost:${PORT}`);
+  logInfo(`Kalshi backend listening on http://localhost:${PORT}`);
+  logInfo(`Environment: ${ENV.NODE_ENV}`);
+  if (ENV.KALSHI_DRY_RUN) {
+    logWarn("KALSHI_DRY_RUN is enabled - no real orders will be placed");
+  }
 });
 
 
