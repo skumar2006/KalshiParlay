@@ -5,7 +5,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { ENV } from '../config/env.js';
-import { logError, logInfo } from './utils/logger.js';
+import { logError, logInfo, logWarn } from './utils/logger.js';
 
 /**
  * Create a Supabase client with user's JWT token
@@ -163,9 +163,11 @@ export async function getParlayBets(userId, environment = null, userToken) {
       throw new Error('User token is required');
     }
     const supabase = getSupabaseClient(userToken);
+    // Try to select with market_image_url first, fallback if column doesn't exist
+    let selectFields = 'id, market_id, market_title, market_url, image_url, market_image_url, option_id, option_label, prob, ticker, side, environment, created_at';
     let query = supabase
       .from('parlay_bets')
-      .select('id, market_id, market_title, market_url, image_url, option_id, option_label, prob, ticker, side, environment, created_at')
+      .select(selectFields)
       .eq('user_uuid', userId)
       .order('created_at', { ascending: true });
     
@@ -173,7 +175,26 @@ export async function getParlayBets(userId, environment = null, userToken) {
       query = query.eq('environment', environment);
     }
     
-    const { data, error } = await query;
+    let { data, error } = await query;
+    
+    // If error is about missing column, retry without it
+    if (error && error.code === '42703' && error.message?.includes('market_image_url')) {
+      logWarn('market_image_url column does not exist, selecting without it. Please run migration.');
+      selectFields = 'id, market_id, market_title, market_url, image_url, option_id, option_label, prob, ticker, side, environment, created_at';
+      query = supabase
+        .from('parlay_bets')
+        .select(selectFields)
+        .eq('user_uuid', userId)
+        .order('created_at', { ascending: true });
+      
+      if (environment) {
+        query = query.eq('environment', environment);
+      }
+      
+      const retryResult = await query;
+      data = retryResult.data;
+      error = retryResult.error;
+    }
     
     if (error) {
       logError('Error fetching parlay bets', error);
@@ -186,6 +207,7 @@ export async function getParlayBets(userId, environment = null, userToken) {
       marketTitle: row.market_title,
       marketUrl: row.market_url,
       imageUrl: row.image_url,
+      marketImageUrl: row.market_image_url || null, // Will be null if column doesn't exist
       optionId: row.option_id,
       optionLabel: row.option_label,
       side: row.side || null,
@@ -228,24 +250,45 @@ export async function addParlayBet(userId, bet, userToken) {
       }
     }
     
-    const { data, error } = await supabase
+    // Try to insert with market_image_url first, fallback if column doesn't exist
+    let insertData = {
+      user_uuid: userId,
+      user_id: userId, // Keep for backward compatibility
+      market_id: bet.marketId,
+      market_title: bet.marketTitle,
+      market_url: bet.marketUrl || null,
+      image_url: bet.imageUrl || null,
+      option_id: bet.optionId,
+      option_label: bet.optionLabel,
+      prob: bet.prob,
+      ticker: bet.ticker || null,
+      side: bet.side || null,
+      environment: environment
+    };
+    
+    // Try with market_image_url first
+    if (bet.marketImageUrl) {
+      insertData.market_image_url = bet.marketImageUrl;
+    }
+    
+    let { data, error } = await supabase
       .from('parlay_bets')
-      .insert({
-        user_uuid: userId,
-        user_id: userId, // Keep for backward compatibility
-        market_id: bet.marketId,
-        market_title: bet.marketTitle,
-        market_url: bet.marketUrl || null,
-        image_url: bet.imageUrl || null,
-        option_id: bet.optionId,
-        option_label: bet.optionLabel,
-        prob: bet.prob,
-        ticker: bet.ticker || null,
-        side: bet.side || null,
-        environment: environment
-      })
+      .insert(insertData)
       .select()
       .single();
+    
+    // If error is about missing column, retry without it
+    if (error && error.code === '42703' && error.message?.includes('market_image_url')) {
+      logWarn('market_image_url column does not exist, inserting without it. Please run migration.');
+      delete insertData.market_image_url;
+      const retryResult = await supabase
+        .from('parlay_bets')
+        .insert(insertData)
+        .select()
+        .single();
+      data = retryResult.data;
+      error = retryResult.error;
+    }
     
     if (error) {
       logError('Error adding parlay bet', error);
@@ -258,6 +301,7 @@ export async function addParlayBet(userId, bet, userToken) {
       marketTitle: data.market_title,
       marketUrl: data.market_url,
       imageUrl: data.image_url,
+      marketImageUrl: data.market_image_url || null,
       optionId: data.option_id,
       optionLabel: data.option_label,
       prob: parseFloat(data.prob || 0),

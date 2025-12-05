@@ -3,17 +3,26 @@
   <head>
     <meta charset="UTF-8" />
     <title>Kalshi Parlay Helper</title>
+    <link rel="icon" type="image/png" href="public/KalshiParlay Logo (3).png" />
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
+    <!-- Initial Loading Screen -->
+    <div id="initial-loading" class="initial-loading">
+      <img src="public/KalshiParlay Logo (3).png" alt="Kalshi Parlay" class="loading-logo" />
+    </div>
+
     <div class="app">
       <!-- Top bar with profile and menu buttons -->
       <div class="top-bar">
         <button id="profile-btn" class="icon-btn" title="Profile">
-          <img src="public/pfp.jpeg" alt="Profile" />
+          <img src="public/pfp.svg" alt="Profile" />
         </button>
+        <div class="logo-container">
+          <img src="public/KalshiParlay_Logo__1_-removebg-preview (1).png" alt="Kalshi Parlay" class="logo" />
+        </div>
         <button id="menu-btn" class="icon-btn" title="Menu">
-          <img src="public/menu.jpeg" alt="Menu" />
+          <img src="public/menu.svg" alt="Menu" />
         </button>
       </div>
 
@@ -60,7 +69,9 @@
       <div class="bet-modal">
         <div class="bet-modal-header">
           <h2>Withdraw Funds</h2>
-          <button id="close-withdraw-btn" class="close-overlay-btn">×</button>
+          <button id="close-withdraw-btn" class="close-overlay-btn">
+            <img src="public/close.svg" alt="Close" />
+          </button>
         </div>
         
         <div class="bet-modal-body">
@@ -110,7 +121,9 @@
       <div class="bet-modal">
         <div class="bet-modal-header">
           <h2>Place Your Parlay</h2>
-          <button id="close-overlay-btn" class="close-overlay-btn">×</button>
+          <button id="close-overlay-btn" class="close-overlay-btn">
+            <img src="public/close.svg" alt="Close" />
+          </button>
         </div>
         
         <div class="bet-modal-body">
@@ -161,7 +174,9 @@
       <div class="bet-modal">
         <div class="bet-modal-header">
           <h2>Buy Credits</h2>
-          <button id="close-buy-credits-btn" class="close-overlay-btn">×</button>
+          <button id="close-buy-credits-btn" class="close-overlay-btn">
+            <img src="public/close.svg" alt="Close" />
+          </button>
         </div>
         
         <div class="bet-modal-body">
@@ -209,8 +224,12 @@
         <div class="bet-modal-header">
           <h2 id="profile-header-title">Profile</h2>
           <div style="display: flex; gap: 8px; align-items: center;">
-            <button id="profile-back-btn" class="close-overlay-btn" style="display: none;">←</button>
-            <button id="close-profile-btn" class="close-overlay-btn">×</button>
+            <button id="profile-back-btn" class="close-overlay-btn" style="display: none;">
+              <img src="public/backward.svg" alt="Back" />
+            </button>
+            <button id="close-profile-btn" class="close-overlay-btn">
+              <img src="public/close.svg" alt="Close" />
+            </button>
           </div>
         </div>
         <div class="bet-modal-body">
@@ -330,19 +349,23 @@
         <div class="bet-modal-header">
           <h2 id="menu-header-title">Menu</h2>
           <div style="display: flex; gap: 8px; align-items: center;">
-            <button id="menu-back-btn" class="close-overlay-btn" style="display: none;">←</button>
-            <button id="close-menu-btn" class="close-overlay-btn">×</button>
+            <button id="menu-back-btn" class="close-overlay-btn" style="display: none;">
+              <img src="public/backward.svg" alt="Back" />
+            </button>
+            <button id="close-menu-btn" class="close-overlay-btn">
+              <img src="public/close.svg" alt="Close" />
+            </button>
           </div>
         </div>
         <div class="bet-modal-body">
           <!-- Menu Main View -->
           <div id="menu-main-content" class="menu-view">
             <div style="display: flex; flex-direction: column; gap: 12px;">
-              <button id="menu-current-parlays-btn" class="get-quote-btn" style="width: 100%; text-align: left; justify-content: flex-start; padding-left: 20px;">
-                📋 Current Parlays
+              <button id="menu-current-parlays-btn" class="get-quote-btn" style="width: 100%; text-align: center; justify-content: center;">
+                Current Parlays
               </button>
-              <button id="menu-parlay-history-btn" class="get-quote-btn" style="width: 100%; text-align: left; justify-content: flex-start; padding-left: 20px;">
-                📊 Previous Parlay History
+              <button id="menu-parlay-history-btn" class="get-quote-btn" style="width: 100%; text-align: center; justify-content: center;">
+                Previous Parlay History
               </button>
             </div>
           </div>
@@ -351,7 +374,6 @@
           <div id="menu-current-parlays-content" class="menu-view" style="display: none;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
               <h3 style="margin: 0;">Current Parlays</h3>
-              <button id="menu-refresh-current-parlays-btn" class="refresh-btn" title="Refresh">↻</button>
             </div>
             <div id="menu-parlay-container" class="parlay-container" style="max-height: 400px; overflow-y: auto;">
               <!-- Current parlay bets will be rendered here -->
@@ -377,7 +399,9 @@
       <div class="bet-modal">
         <div class="bet-modal-header">
           <h2>Login / Sign Up</h2>
-          <button id="close-login-btn" class="close-overlay-btn" style="display: none;">×</button>
+          <button id="close-login-btn" class="close-overlay-btn" style="display: none;">
+            <img src="public/close.svg" alt="Close" />
+          </button>
         </div>
         <div class="bet-modal-body">
           <div id="login-form">

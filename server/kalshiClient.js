@@ -1,21 +1,18 @@
 import fetch from "node-fetch";
-import dotenv from "dotenv";
+import { ENV } from "../config/env.js";
 
-// Ensure .env is loaded before we read process.env in this module.
-dotenv.config();
-
-// Use demo environment for market data fetching
-const USE_DEMO = true;
+// Use environment from config instead of hardcoded flag
+const USE_DEMO = !ENV.IS_PRODUCTION;
 const KALSHI_DEMO_API_BASE = "https://demo-api.kalshi.co/trade-api/v2";
 const KALSHI_PROD_API_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
 const KALSHI_API_BASE_URL =
-  process.env.KALSHI_API_BASE_URL || (USE_DEMO ? KALSHI_DEMO_API_BASE : KALSHI_PROD_API_BASE);
+  ENV.KALSHI_API_BASE_URL || (USE_DEMO ? KALSHI_DEMO_API_BASE : KALSHI_PROD_API_BASE);
 
-// Use demo API key for demo environment
+// Use appropriate API key based on environment
 const API_KEY = USE_DEMO 
-  ? process.env.KALSHI_DEMO_API_KEY || process.env.KALSHI_API_KEY
-  : process.env.KALSHI_API_KEY;
+  ? ENV.KALSHI_DEMO_API_KEY || ENV.KALSHI_API_KEY
+  : ENV.KALSHI_API_KEY;
 
 if (!API_KEY) {
   const envVar = USE_DEMO ? 'KALSHI_DEMO_API_KEY' : 'KALSHI_API_KEY';
@@ -53,20 +50,66 @@ async function kalshiRequest(path) {
 export async function getMarketById(marketId) {
   const upperTicker = marketId.toUpperCase();
   
+  // First, try direct market lookup (faster and more reliable for single markets)
+  // This handles cases where markets might not appear in series queries
+  try {
+    const directData = await kalshiRequest(`/markets/${upperTicker}`);
+    if (directData.market) {
+      console.log(`[kalshiClient] Found market via direct lookup: ${upperTicker}`);
+      return { markets: [directData.market] };
+    }
+  } catch (err) {
+    // Direct lookup failed - log the actual error details
+    console.error(`[kalshiClient] Direct lookup failed for ${upperTicker}:`, err.message);
+    console.error(`[kalshiClient] Error stack:`, err.stack);
+    // Continue to series-based search
+    console.log(`[kalshiClient] Trying series search...`);
+  }
+  
   // Extract series from ticker (e.g., "KXNFLGAME" from "KXNFLGAME-25NOV16SEALA")
   const seriesMatch = upperTicker.match(/^([A-Z]+)/);
   const series = seriesMatch ? seriesMatch[1] : null;
   
+  console.log(`[kalshiClient] Extracted series: ${series} from ticker: ${upperTicker}`);
+  
   if (series) {
     try {
-      // Fetch markets for this series
-      const data = await kalshiRequest(`/markets?series_ticker=${series}&limit=500`);
+      // Fetch markets for this series - try with higher limit first
+      let data = await kalshiRequest(`/markets?series_ticker=${series}&limit=1000`);
+      
+      // If still not found, try searching all markets for this series without limit
+      if (!data.markets || data.markets.length === 0) {
+        console.log(`[kalshiClient] Trying without limit parameter...`);
+        data = await kalshiRequest(`/markets?series_ticker=${series}`);
+      }
+      
+      console.log(`[kalshiClient] Series query returned ${data.markets?.length || 0} markets`);
+      
+      // Also try searching by the full ticker as event_ticker
+      if ((!data.markets || data.markets.length === 0) && upperTicker.includes('-')) {
+        console.log(`[kalshiClient] Trying event_ticker search for ${upperTicker}`);
+        try {
+          const eventData = await kalshiRequest(`/markets?event_ticker=${upperTicker}&limit=500`);
+          if (eventData.markets && eventData.markets.length > 0) {
+            console.log(`[kalshiClient] Found ${eventData.markets.length} markets via event_ticker`);
+            return { markets: eventData.markets };
+          }
+        } catch (eventErr) {
+          console.log(`[kalshiClient] event_ticker search failed:`, eventErr.message);
+        }
+      }
       
       if (data.markets) {
         // First, try exact ticker match
         let market = data.markets.find(m => m.ticker === upperTicker);
         if (market) {
+          console.log(`[kalshiClient] Found exact match in series: ${upperTicker}`);
           return { markets: [market] };
+        }
+        
+        // Log first few tickers for debugging
+        if (data.markets.length > 0) {
+          console.log(`[kalshiClient] Sample tickers from series:`, data.markets.slice(0, 5).map(m => m.ticker));
         }
         
         // If not found, the URL might be an event ticker
@@ -81,6 +124,11 @@ export async function getMarketById(marketId) {
           if (m.ticker && m.ticker.toUpperCase().startsWith(upperTicker + '-')) {
             return true;
           }
+          // For markets like KXINXU-25DEC05H1400, try matching without requiring trailing dash
+          // The API might have markets like KXINXU-25DEC05H1400-T... (with price threshold)
+          if (m.ticker && m.ticker.toUpperCase().startsWith(upperTicker)) {
+            return true;
+          }
           return false;
         });
         
@@ -90,11 +138,32 @@ export async function getMarketById(marketId) {
           return { markets: eventMarkets };
         }
         
-        // If still no match and the ticker looks like an event ticker (contains numbers after series)
-        // Try to match by series and event number pattern
-        // For example, "KXPRESPERSON-28" should match markets like "KXPRESPERSON-28-*"
+        // If still no match, try matching by date/time pattern for markets like KXINXU-25DEC05H1400
+        // Extract date/time part (e.g., "25DEC05H1400" from "KXINXU-25DEC05H1400")
         const tickerParts = upperTicker.split('-');
         if (tickerParts.length >= 2) {
+          const dateTimePart = tickerParts.slice(1).join('-'); // Everything after series
+          console.log(`[kalshiClient] Trying to match by date/time pattern: ${dateTimePart}`);
+          
+          // Try to find markets that contain this date/time pattern
+          const dateTimeMarkets = data.markets.filter(m => {
+            if (!m.ticker) return false;
+            // Check if ticker contains the date/time pattern
+            const marketParts = m.ticker.split('-');
+            if (marketParts.length >= 2) {
+              const marketDateTime = marketParts.slice(1).join('-');
+              // Match if the date/time part starts with our pattern (handles price suffixes like -T7574.9999)
+              return marketDateTime.toUpperCase().startsWith(dateTimePart.toUpperCase());
+            }
+            return false;
+          });
+          
+          if (dateTimeMarkets.length > 0) {
+            console.log(`[kalshiClient] Found ${dateTimeMarkets.length} markets matching date/time pattern ${dateTimePart}`);
+            return { markets: dateTimeMarkets };
+          }
+          
+          // Original pattern matching (for events like KXPRESPERSON-28)
           const eventPattern = tickerParts.slice(0, 2).join('-'); // e.g., "KXPRESPERSON-28"
           const patternMarkets = data.markets.filter(m => 
             m.ticker && m.ticker.toUpperCase().startsWith(eventPattern + '-')
@@ -107,11 +176,25 @@ export async function getMarketById(marketId) {
         }
       }
     } catch (err) {
-      console.error(`Failed to fetch markets for series ${series}:`, err);
+      console.error(`[kalshiClient] Failed to fetch markets for series ${series}:`, err.message);
+      console.error(`[kalshiClient] Series error details:`, err);
     }
   }
   
+  // Fallback: Try orderbook endpoint - sometimes markets are accessible here even if not in listings
+  console.log(`[kalshiClient] Trying orderbook endpoint as fallback for ${upperTicker}`);
+  try {
+    const orderbookData = await kalshiRequest(`/markets/${upperTicker}/orderbook`);
+    if (orderbookData.market) {
+      console.log(`[kalshiClient] Found market via orderbook endpoint: ${upperTicker}`);
+      return { markets: [orderbookData.market] };
+    }
+  } catch (orderbookErr) {
+    console.log(`[kalshiClient] Orderbook endpoint also failed:`, orderbookErr.message);
+  }
+  
   // Fallback: return empty if not found
+  console.warn(`[kalshiClient] Market ${upperTicker} not found via any method`);
   return { markets: [] };
 }
 

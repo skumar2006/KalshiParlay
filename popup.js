@@ -67,8 +67,50 @@ async function initSupabase() {
   }
 }
 
+// Helper functions for loading states
+function showLoading(element) {
+  if (element) {
+    element.classList.add('loading');
+  }
+}
+
+function hideLoading(element) {
+  if (element) {
+    element.classList.remove('loading');
+  }
+}
+
+// Track when loading started to ensure minimum display time
+let loadingStartTime = Date.now();
+const MIN_LOADING_TIME = 1000; // 1 second minimum
+let initialLoadingHidden = false;
+
+function hideInitialLoading() {
+  if (initialLoadingHidden) return;
+  initialLoadingHidden = true;
+  
+  const initialLoading = document.getElementById('initial-loading');
+  if (!initialLoading) return;
+  
+  const elapsed = Date.now() - loadingStartTime;
+  const remainingTime = Math.max(0, MIN_LOADING_TIME - elapsed);
+  
+  setTimeout(() => {
+    initialLoading.classList.add('hidden');
+    setTimeout(() => {
+      initialLoading.style.display = 'none';
+    }, 200); // Faster fade out
+  }, remainingTime);
+}
+
 // Main initialization function - ensures Supabase is ready before app init
 async function initializeApp() {
+  // Track loading start time
+  loadingStartTime = Date.now();
+  
+  // CRITICAL: Hide loading screen immediately so login overlay can show
+  hideInitialLoading();
+  
   // CRITICAL: Show login overlay IMMEDIATELY before anything else
   // This ensures users can always access the login page
   const loginOverlay = document.getElementById('login-overlay');
@@ -484,9 +526,9 @@ function renderOptions(contracts) {
         const yesProb = document.createElement("span");
         yesProb.className = "option-btn-prob";
         yesProb.textContent = typeof option.yes.prob === "number" 
-          ? `${option.yes.prob}%` 
+          ? `${option.yes.prob.toFixed(1)}%` 
           : option.yes.price != null 
-            ? `${Math.round(option.yes.price)}%` 
+            ? `${option.yes.price.toFixed(1)}%` 
             : "–";
         
         yesBtn.appendChild(yesLabel);
@@ -513,9 +555,9 @@ function renderOptions(contracts) {
         const noProb = document.createElement("span");
         noProb.className = "option-btn-prob";
         noProb.textContent = typeof option.no.prob === "number" 
-          ? `${option.no.prob}%` 
+          ? `${option.no.prob.toFixed(1)}%` 
           : option.no.price != null 
-            ? `${Math.round(option.no.price)}%` 
+            ? `${option.no.price.toFixed(1)}%` 
             : "–";
         
         noBtn.appendChild(noLabel);
@@ -559,7 +601,7 @@ function renderOptions(contracts) {
       const percent = document.createElement("span");
       percent.className = "option-percent";
       percent.textContent =
-        typeof c.prob === "number" ? `${c.prob}%` : c.price != null ? c.price : "–";
+        typeof c.prob === "number" ? `${c.prob.toFixed(1)}%` : c.price != null ? `${c.price.toFixed(1)}%` : "–";
 
       row.appendChild(label);
       row.appendChild(percent);
@@ -640,12 +682,42 @@ function renderParlay() {
     
     const icon = document.createElement("div");
     icon.className = "parlay-item-icon";
-    if (bet.imageUrl) {
+    
+    // Try option image first, then market image, then text fallback
+    const tryImage = (imageUrl, isFallback = false) => {
+      if (!imageUrl) {
+        if (!isFallback) {
+          // Try market image if option image doesn't exist
+          return tryImage(bet.marketImageUrl, true);
+        }
+        // No images available - show text
+        const titleText = document.createElement("div");
+        titleText.className = "parlay-item-icon-text";
+        titleText.textContent = bet.marketTitle.charAt(0).toUpperCase();
+        icon.appendChild(titleText);
+        return;
+      }
+      
       const img = document.createElement("img");
-      img.src = bet.imageUrl;
+      img.src = imageUrl;
       img.alt = "";
+      img.onerror = () => {
+        img.style.display = "none";
+        if (!isFallback && bet.marketImageUrl) {
+          // Try market image if option image fails
+          tryImage(bet.marketImageUrl, true);
+        } else {
+          // Both images failed or no market image - show text
+          const titleText = document.createElement("div");
+          titleText.className = "parlay-item-icon-text";
+          titleText.textContent = bet.marketTitle.charAt(0).toUpperCase();
+          icon.appendChild(titleText);
+        }
+      };
       icon.appendChild(img);
-    }
+    };
+    
+    tryImage(bet.imageUrl);
     
     const info = document.createElement("div");
     info.className = "parlay-item-info";
@@ -667,7 +739,13 @@ function renderParlay() {
     
     const deleteBtn = document.createElement("button");
     deleteBtn.className = "parlay-item-delete";
-    deleteBtn.textContent = "×";
+    const deleteIcon = document.createElement("img");
+    deleteIcon.src = "public/close.svg";
+    deleteIcon.alt = "Delete";
+    deleteIcon.style.width = "14px";
+    deleteIcon.style.height = "14px";
+    deleteIcon.style.filter = "brightness(0) invert(1)"; // Make icon white for red background
+    deleteBtn.appendChild(deleteIcon);
     deleteBtn.title = "Remove from parlay";
     deleteBtn.addEventListener("click", (e) => {
       e.stopPropagation(); // Prevent opening market when deleting
@@ -775,7 +853,8 @@ async function addToParlay() {
     marketId: currentMarket.id,
     marketTitle: currentMarket.title,
     marketUrl: marketUrl,
-    imageUrl: selectedOption.imageUrl || currentMarket.imageUrl, // Use option image, fallback to market image
+    imageUrl: selectedOption.imageUrl || null, // Option-specific image
+    marketImageUrl: currentMarket.imageUrl || null, // Market image as fallback
     optionId: selectedOption.id,
     optionLabel: selectedOption.displayLabel || selectedOption.optionLabel || selectedOption.label,
     prob: selectedOption.prob,
@@ -841,12 +920,42 @@ function showBetOverlay() {
       // Add image icon
       const icon = document.createElement("div");
       icon.className = "modal-parlay-item-icon";
-      if (bet.imageUrl) {
+      
+      // Try option image first, then market image, then text fallback
+      const tryImage = (imageUrl, isFallback = false) => {
+        if (!imageUrl) {
+          if (!isFallback) {
+            // Try market image if option image doesn't exist
+            return tryImage(bet.marketImageUrl, true);
+          }
+          // No images available - show text
+          const titleText = document.createElement("div");
+          titleText.className = "parlay-item-icon-text";
+          titleText.textContent = bet.marketTitle.charAt(0).toUpperCase();
+          icon.appendChild(titleText);
+          return;
+        }
+        
         const img = document.createElement("img");
-        img.src = bet.imageUrl;
+        img.src = imageUrl;
         img.alt = "";
+        img.onerror = () => {
+          img.style.display = "none";
+          if (!isFallback && bet.marketImageUrl) {
+            // Try market image if option image fails
+            tryImage(bet.marketImageUrl, true);
+          } else {
+            // Both images failed or no market image - show text
+            const titleText = document.createElement("div");
+            titleText.className = "parlay-item-icon-text";
+            titleText.textContent = bet.marketTitle.charAt(0).toUpperCase();
+            icon.appendChild(titleText);
+          }
+        };
         icon.appendChild(img);
-      }
+      };
+      
+      tryImage(bet.imageUrl);
       
       const info = document.createElement("div");
       info.className = "modal-parlay-item-info";
@@ -1224,6 +1333,9 @@ function setupAuthUI() {
     try {
       const isAuthenticated = await checkAuthStatus();
       
+      // Hide loading screen as soon as we know auth status
+      hideInitialLoading();
+      
       if (isAuthenticated) {
         // Hide login modal completely, show app content
         if (loginOverlay) {
@@ -1492,18 +1604,29 @@ function setupAuthUI() {
   
   if (profileBtn) {
     profileBtn.addEventListener('click', async () => {
-      // Update email in profile overlay
-      const user = await getCurrentUser();
-      if (user && profileEmail) {
-        profileEmail.textContent = user.email || 'Not available';
-      }
-      // Load wallet balance for profile display
-      await loadWalletBalance();
-      // Show main profile view
-      showProfileMainView();
-      // Show profile overlay
+      // Show profile overlay immediately
       if (profileOverlay) {
         profileOverlay.classList.remove('hidden');
+        const modalBody = profileOverlay.querySelector('.bet-modal-body');
+        showLoading(modalBody);
+      }
+      
+      try {
+        // Update email in profile overlay
+        const user = await getCurrentUser();
+        if (user && profileEmail) {
+          profileEmail.textContent = user.email || 'Not available';
+        }
+        // Load wallet balance for profile display
+        await loadWalletBalance();
+        // Show main profile view
+        showProfileMainView();
+      } finally {
+        // Hide loading after data is loaded
+        if (profileOverlay) {
+          const modalBody = profileOverlay.querySelector('.bet-modal-body');
+          hideLoading(modalBody);
+        }
       }
     });
   }
@@ -1601,26 +1724,31 @@ function setupAuthUI() {
   // Menu navigation buttons
   const menuCurrentParlaysBtn = document.getElementById('menu-current-parlays-btn');
   if (menuCurrentParlaysBtn) {
-    menuCurrentParlaysBtn.addEventListener('click', () => {
+    menuCurrentParlaysBtn.addEventListener('click', async () => {
       showMenuCurrentParlaysView();
+      // Show loading state
+      const container = document.getElementById('menu-parlay-container');
+      if (container) {
+        container.innerHTML = '<div class="section-loading"><div class="loading-spinner"></div>Loading current parlays...</div>';
+      }
+      await loadAndRenderCurrentParlays();
     });
   }
   
   const menuParlayHistoryBtn = document.getElementById('menu-parlay-history-btn');
   if (menuParlayHistoryBtn) {
-    menuParlayHistoryBtn.addEventListener('click', () => {
+    menuParlayHistoryBtn.addEventListener('click', async () => {
       showMenuParlayHistoryView();
+      // Show loading state
+      const container = document.getElementById('menu-parlay-history-container');
+      if (container) {
+        container.innerHTML = '<div class="section-loading"><div class="loading-spinner"></div>Loading parlay history...</div>';
+      }
+      await loadAndRenderMenuParlayHistory();
     });
   }
   
   // Refresh buttons
-  const menuRefreshCurrentParlaysBtn = document.getElementById('menu-refresh-current-parlays-btn');
-  if (menuRefreshCurrentParlaysBtn) {
-    menuRefreshCurrentParlaysBtn.addEventListener('click', async () => {
-      await loadAndRenderCurrentParlays();
-    });
-  }
-  
   const menuRefreshParlayHistoryBtn = document.getElementById('menu-refresh-parlay-history-btn');
   if (menuRefreshParlayHistoryBtn) {
     menuRefreshParlayHistoryBtn.addEventListener('click', async () => {
@@ -1693,6 +1821,8 @@ async function init() {
       // Don't initialize app if not authenticated
       // Login modal should already be showing from setupAuthUI in initializeApp()
       console.log('User not authenticated - showing login modal');
+      // Hide loading screen immediately
+      hideInitialLoading();
       // Ensure login overlay is visible and app is hidden
       const loginOverlay = document.getElementById('login-overlay');
       const appContent = document.querySelector('.app');
@@ -1737,6 +1867,12 @@ async function init() {
     setMarketImage(null);
     renderOptions([]);
     return;
+  }
+
+  // Show loading state for market options
+  const optionsContainer = document.getElementById('options-container');
+  if (optionsContainer) {
+    optionsContainer.innerHTML = '<div class="section-loading"><div class="loading-spinner"></div>Loading market data...</div>';
   }
 
   // First try: backend API (preferred, richer data).
@@ -2277,8 +2413,43 @@ function createParlayHistoryCard(parlay) {
   headerLeft.appendChild(date);
   headerLeft.appendChild(stake);
   
+  // Header right - status badge and refresh button
+  const headerRight = document.createElement("div");
+  headerRight.className = "parlay-history-header-right";
+  headerRight.appendChild(statusBadge);
+  
+  // Refresh button for pending parlays - add to header right
+  if (status === 'pending') {
+    const refreshBtn = document.createElement("button");
+    refreshBtn.className = "refresh-status-btn";
+    
+    // Create icon element
+    const icon = document.createElement("img");
+    icon.src = "public/refresh.svg";
+    icon.alt = "Refresh";
+    icon.className = "refresh-icon";
+    
+    refreshBtn.appendChild(icon);
+    
+    refreshBtn.onclick = async () => {
+      refreshBtn.disabled = true;
+      try {
+        await checkParlayStatusAndRefresh(parlay.session_id);
+        // Reload the parlay history to show updated status
+        await loadParlayHistory();
+      } catch (err) {
+        console.error("Error refreshing status:", err);
+        alert("Failed to refresh status. Please try again.");
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    };
+    
+    headerRight.appendChild(refreshBtn);
+  }
+  
   header.appendChild(headerLeft);
-  header.appendChild(statusBadge);
+  header.appendChild(headerRight);
   
   // Legs
   const legsContainer = document.createElement("div");
@@ -2300,12 +2471,42 @@ function createParlayHistoryCard(parlay) {
     
     const legIcon = document.createElement("div");
     legIcon.className = "parlay-history-leg-icon";
-    if (leg.imageUrl) {
+    
+    // Try option image first, then market image, then text fallback
+    const tryImage = (imageUrl, isFallback = false) => {
+      if (!imageUrl) {
+        if (!isFallback) {
+          // Try market image if option image doesn't exist
+          return tryImage(leg.marketImageUrl, true);
+        }
+        // No images available - show text
+        const titleText = document.createElement("div");
+        titleText.className = "parlay-item-icon-text";
+        titleText.textContent = (leg.marketTitle || leg.title || "").charAt(0).toUpperCase();
+        legIcon.appendChild(titleText);
+        return;
+      }
+      
       const img = document.createElement("img");
-      img.src = leg.imageUrl;
+      img.src = imageUrl;
       img.alt = "";
+      img.onerror = () => {
+        img.style.display = "none";
+        if (!isFallback && leg.marketImageUrl) {
+          // Try market image if option image fails
+          tryImage(leg.marketImageUrl, true);
+        } else {
+          // Both images failed or no market image - show text
+          const titleText = document.createElement("div");
+          titleText.className = "parlay-item-icon-text";
+          titleText.textContent = (leg.marketTitle || leg.title || "").charAt(0).toUpperCase();
+          legIcon.appendChild(titleText);
+        }
+      };
       legIcon.appendChild(img);
-    }
+    };
+    
+    tryImage(leg.imageUrl);
     
     const legInfo = document.createElement("div");
     legInfo.className = "parlay-history-leg-info";
@@ -2350,29 +2551,6 @@ function createParlayHistoryCard(parlay) {
   `;
   
   footer.appendChild(payoutInfo);
-  
-  // Refresh button for pending parlays
-  if (status === 'pending') {
-    const refreshBtn = document.createElement("button");
-    refreshBtn.className = "refresh-status-btn";
-    refreshBtn.textContent = "🔄 Refresh Status";
-    refreshBtn.onclick = async () => {
-      refreshBtn.disabled = true;
-      refreshBtn.textContent = "Checking...";
-      try {
-        await checkParlayStatusAndRefresh(parlay.session_id);
-        // Reload the parlay history to show updated status
-        await loadParlayHistory();
-      } catch (err) {
-        console.error("Error refreshing status:", err);
-        alert("Failed to refresh status. Please try again.");
-      } finally {
-        refreshBtn.disabled = false;
-        refreshBtn.textContent = "🔄 Refresh Status";
-      }
-    };
-    footer.appendChild(refreshBtn);
-  }
   
   // Claim button (if won and not claimed)
   if (status === 'won' && claimableAmount > 0 && !claimed) {
@@ -2744,99 +2922,20 @@ function hasPendingLegs(parlay) {
 }
 
 // Load and render current parlays in menu
+// Only shows completed parlays that haven't been resolved yet (not the parlay being built)
 async function loadAndRenderCurrentParlays() {
   const container = document.getElementById("menu-parlay-container");
   if (!container) return;
   
   try {
-    container.innerHTML = '<div class="loading-parlays">Loading...</div>';
+    container.innerHTML = '<div class="section-loading"><div class="loading-spinner"></div>Loading current parlays...</div>';
     
     const uid = await getUserId(currentEnvironment);
     
-    // Load both: bets being built AND completed purchases with pending legs
-    const [betsRes, historyRes] = await Promise.all([
-      authenticatedFetch(`${BACKEND_BASE_URL}/api/parlay/${uid}?environment=${currentEnvironment}`),
-      authenticatedFetch(`${BACKEND_BASE_URL}/api/parlay-history/${uid}`)
-    ]);
+    // Only load completed purchases with pending legs (not bets being built)
+    const historyRes = await authenticatedFetch(`${BACKEND_BASE_URL}/api/parlay-history/${uid}`);
     
     container.innerHTML = "";
-    const itemsToShow = [];
-    
-    // Add bets being built (from parlay_bets table)
-    if (betsRes.ok) {
-      const betsData = await betsRes.json();
-      const allBets = betsData.bets || [];
-      const currentParlayBets = allBets.filter(bet => bet.environment === currentEnvironment);
-      
-      if (currentParlayBets.length > 0) {
-        // Show message if only 1 bet
-        if (currentParlayBets.length === 1) {
-          const hint = document.createElement("div");
-          hint.className = "parlay-hint";
-          hint.textContent = "Add at least one more bet to place a parlay";
-          hint.style.cssText = "padding: 8px; text-align: center; color: #666; font-size: 12px; background: #f8f9fa; border-radius: 8px; margin-bottom: 8px; width: 100%;";
-          container.appendChild(hint);
-        }
-        
-        // Render bets being built
-        currentParlayBets.forEach((bet) => {
-          const item = document.createElement("div");
-          item.className = "parlay-item";
-          item.style.cursor = "pointer";
-          item.title = `Click to open ${bet.marketTitle} on Kalshi`;
-          
-          const icon = document.createElement("div");
-          icon.className = "parlay-item-icon";
-          if (bet.imageUrl) {
-            const img = document.createElement("img");
-            img.src = bet.imageUrl;
-            img.alt = "";
-            icon.appendChild(img);
-          }
-          
-          const info = document.createElement("div");
-          info.className = "parlay-item-info";
-          
-          const title = document.createElement("div");
-          title.className = "parlay-item-title";
-          title.textContent = bet.marketTitle;
-          
-          const option = document.createElement("div");
-          option.className = "parlay-item-option";
-          option.textContent = bet.optionLabel;
-          
-          info.appendChild(title);
-          info.appendChild(option);
-          
-          const prob = document.createElement("div");
-          prob.className = "parlay-item-prob";
-          prob.textContent = typeof bet.prob === "number" ? `${bet.prob}%` : "–";
-          
-          const deleteBtn = document.createElement("button");
-          deleteBtn.className = "parlay-item-delete";
-          deleteBtn.textContent = "×";
-          deleteBtn.title = "Remove from parlay";
-          deleteBtn.addEventListener("click", async (e) => {
-            e.stopPropagation();
-            await removeBetFromParlay(bet.id);
-            // Reload current parlays after removal
-            await loadAndRenderCurrentParlays();
-          });
-          
-          // Add click handler to open market page
-          item.addEventListener("click", () => {
-            openMarketPage(bet.marketId);
-          });
-          
-          item.appendChild(icon);
-          item.appendChild(info);
-          item.appendChild(prob);
-          item.appendChild(deleteBtn);
-          
-          container.appendChild(item);
-        });
-      }
-    }
     
     // Add completed purchases with pending legs
     if (historyRes.ok) {
@@ -2851,14 +2950,6 @@ async function loadAndRenderCurrentParlays() {
       });
       
       if (pendingParlays.length > 0) {
-        // Add separator if we have bets being built
-        if (container.children.length > 0) {
-          const separator = document.createElement("div");
-          separator.style.cssText = "margin: 16px 0; padding: 8px; text-align: center; color: #666; font-size: 12px; border-top: 1px solid #e0e0e0; border-bottom: 1px solid #e0e0e0;";
-          separator.textContent = "Active Parlays";
-          container.appendChild(separator);
-        }
-        
         // Render completed purchases with pending legs
         pendingParlays.forEach(parlay => {
           const parlayCard = createParlayHistoryCard(parlay);
@@ -2885,7 +2976,7 @@ async function loadAndRenderMenuParlayHistory() {
   if (!container) return;
   
   try {
-    container.innerHTML = '<div class="loading-parlays">Loading...</div>';
+    container.innerHTML = '<div class="section-loading"><div class="loading-spinner"></div>Loading parlay history...</div>';
     
     const uid = await getUserId(currentEnvironment);
     const res = await authenticatedFetch(`${BACKEND_BASE_URL}/api/parlay-history/${uid}`);

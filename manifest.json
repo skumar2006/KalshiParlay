@@ -3,9 +3,19 @@
   "name": "Kalshi Parlay Helper",
   "description": "Scrapes Kalshi market pages to show the current market in a parlay-style popup.",
   "version": "0.8.0",
+  "icons": {
+    "16": "public/KalshiParlay Logo (3).png",
+    "48": "public/KalshiParlay Logo (3).png",
+    "128": "public/KalshiParlay Logo (3).png"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Kalshi Parlay Helper"
+    "default_title": "Kalshi Parlay Helper",
+    "default_icon": {
+      "16": "public/KalshiParlay Logo (3).png",
+      "48": "public/KalshiParlay Logo (3).png",
+      "128": "public/KalshiParlay Logo (3).png"
+    }
   },
   "permissions": ["tabs", "activeTab", "storage"],
   "host_permissions": [

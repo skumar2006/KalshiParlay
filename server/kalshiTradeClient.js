@@ -1,6 +1,7 @@
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
+import { ENV } from '../config/env.js';
 
 dotenv.config();
 
@@ -14,13 +15,13 @@ dotenv.config();
 const KALSHI_DEMO_API_BASE = 'https://demo-api.kalshi.co/trade-api/v2';
 const KALSHI_PROD_API_BASE = 'https://trading-api.kalshi.com/trade-api/v2';
 
-// Use demo environment for testing
-const USE_DEMO = true;
+// Use environment from config instead of hardcoded flag
+const USE_DEMO = !ENV.IS_PRODUCTION;
 const API_BASE = USE_DEMO ? KALSHI_DEMO_API_BASE : KALSHI_PROD_API_BASE;
 
 // DRY RUN MODE - Set to true to log orders without placing them
 // Can be overridden via environment variable KALSHI_DRY_RUN=false
-const DRY_RUN = process.env.KALSHI_DRY_RUN === 'false' ? false : true;
+const DRY_RUN = ENV.KALSHI_DRY_RUN !== false;
 
 /**
  * Normalize private key format (add PEM headers if missing)
@@ -61,8 +62,8 @@ function generateKalshiSignature(timestamp, method, path, body = null) {
   
   // Get private key from environment
   let privateKey = USE_DEMO 
-    ? process.env.KALSHI_DEMO_PRIVATE_KEY 
-    : process.env.KALSHI_PRIVATE_KEY;
+    ? ENV.KALSHI_DEMO_PRIVATE_KEY 
+    : ENV.KALSHI_PRIVATE_KEY;
   
   if (!privateKey) {
     const envVar = USE_DEMO ? 'KALSHI_DEMO_PRIVATE_KEY' : 'KALSHI_PRIVATE_KEY';
@@ -185,8 +186,8 @@ export async function placeKalshiOrder(orderParams) {
     console.log(`   ${API_BASE}/portfolio/orders`);
     console.log(`\n💡 To execute real orders:`);
     console.log(`   1. Set KALSHI_DRY_RUN=false in your .env file`);
-    console.log(`   2. Ensure KALSHI_DEMO_PRIVATE_KEY is set in .env`);
-    console.log(`   3. Ensure KALSHI_DEMO_API_KEY is set in .env`);
+    console.log(`   2. Ensure ${USE_DEMO ? 'KALSHI_DEMO_PRIVATE_KEY' : 'KALSHI_PRIVATE_KEY'} is set in .env`);
+    console.log(`   3. Ensure ${USE_DEMO ? 'KALSHI_DEMO_API_KEY' : 'KALSHI_API_KEY'} is set in .env`);
     console.log("\n" + "-".repeat(60) + "\n");
     
     return {
@@ -215,8 +216,8 @@ export async function placeKalshiOrder(orderParams) {
     
     // Get API key
     const apiKey = USE_DEMO 
-      ? process.env.KALSHI_DEMO_API_KEY 
-      : process.env.KALSHI_API_KEY;
+      ? ENV.KALSHI_DEMO_API_KEY 
+      : ENV.KALSHI_API_KEY;
     
     if (!apiKey) {
       const envVar = USE_DEMO ? 'KALSHI_DEMO_API_KEY' : 'KALSHI_API_KEY';
@@ -298,7 +299,7 @@ export async function placeKalshiOrder(orderParams) {
       console.error(`   Full Error Response:`, JSON.stringify(result, null, 2));
       
       // Special handling for common errors
-      if (errorCode === 'insufficient_balance') {
+      if (errorCode === 'insufficient_balance' && USE_DEMO) {
         console.error(`\n   💡 NOTE: Demo account may not have sufficient balance for this order.`);
         console.error(`      This is expected in the demo environment.`);
       }
@@ -517,11 +518,13 @@ export async function executeHedgingStrategy(hedgeBets, metadata = {}) {
     console.log(`   ${dryRunCount} orders simulated`);
     console.log(`\n💡 To execute real orders:`);
     console.log(`   1. Set KALSHI_DRY_RUN=false in your .env file`);
-    console.log(`   2. Ensure KALSHI_DEMO_PRIVATE_KEY is set in .env`);
-    console.log(`   3. Ensure KALSHI_DEMO_API_KEY is set in .env`);
-    console.log(`   4. Test in demo environment first`);
+    console.log(`   2. Ensure ${USE_DEMO ? 'KALSHI_DEMO_PRIVATE_KEY' : 'KALSHI_PRIVATE_KEY'} is set in .env`);
+    console.log(`   3. Ensure ${USE_DEMO ? 'KALSHI_DEMO_API_KEY' : 'KALSHI_API_KEY'} is set in .env`);
+    if (USE_DEMO) {
+      console.log(`   4. Test in demo environment first`);
+    }
   } else {
-    console.log(`\n🚀 REAL ORDERS MODE - Orders placed on Kalshi demo`);
+    console.log(`\n🚀 REAL ORDERS MODE - Orders placed on Kalshi ${USE_DEMO ? 'demo' : 'production'}`);
     console.log(`   ${realOrdersCount} real orders placed successfully`);
     if (failed > 0) {
       console.log(`   ⚠️  ${failed} orders failed - check logs above for details`);

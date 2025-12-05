@@ -66,11 +66,14 @@ const app = express();
 const PORT = ENV.PORT || CONFIG.SERVER.DEFAULT_PORT;
 
 // Initialize Stripe (optional - only if API key is provided)
+// Uses environment-aware key selection (demo or production)
 let stripe = null;
-if (ENV.STRIPE_API_KEY) {
-  stripe = new Stripe(ENV.STRIPE_API_KEY);
+if (ENV.STRIPE_API_KEY_SELECTED) {
+  stripe = new Stripe(ENV.STRIPE_API_KEY_SELECTED);
+  logInfo(`Stripe initialized with ${ENV.IS_PRODUCTION ? 'production' : 'demo'} API key`);
 } else {
-  logWarn("Stripe API key not provided - payment features will be disabled");
+  const envVar = ENV.IS_PRODUCTION ? 'STRIPE_API_KEY' : 'STRIPE_DEMO_API_KEY';
+  logWarn(`Stripe ${envVar} not provided - payment features will be disabled`);
 }
 
 // Initialize Supabase client for auth verification (using anon key for JWT verification)
@@ -407,13 +410,14 @@ app.post('/api/webhook', express.raw({type: 'application/json'}), async (req, re
   let event;
   
   try {
-    // Verify webhook signature (in production, use STRIPE_WEBHOOK_SECRET)
-    if (ENV.STRIPE_WEBHOOK_SECRET) {
-      logInfo("Using webhook secret verification");
-      event = stripe.webhooks.constructEvent(req.body, sig, ENV.STRIPE_WEBHOOK_SECRET);
+    // Verify webhook signature using environment-aware secret
+    if (ENV.STRIPE_WEBHOOK_SECRET_SELECTED) {
+      logInfo(`Using ${ENV.IS_PRODUCTION ? 'production' : 'demo'} webhook secret verification`);
+      event = stripe.webhooks.constructEvent(req.body, sig, ENV.STRIPE_WEBHOOK_SECRET_SELECTED);
     } else {
       // For development without webhook signing
-      logWarn("No webhook secret - parsing JSON directly (dev mode)");
+      const envVar = ENV.IS_PRODUCTION ? 'STRIPE_WEBHOOK_SECRET' : 'STRIPE_DEMO_WEBHOOK_SECRET';
+      logWarn(`No webhook secret (${envVar}) - parsing JSON directly (dev mode)`);
       event = JSON.parse(req.body.toString());
     }
     
@@ -556,7 +560,7 @@ app.post('/api/webhook', express.raw({type: 'application/json'}), async (req, re
             }
             
             // Execute hedging strategy through Kalshi API
-            logInfo(`Executing orders on Kalshi demo environment...`);
+            logInfo(`Executing orders on Kalshi ${ENV.IS_PRODUCTION ? 'production' : 'demo'} environment...`);
             logInfo(`DRY_RUN: ${ENV.KALSHI_DRY_RUN ? 'ENABLED (TESTING)' : 'DISABLED (REAL ORDERS)'}`);
             
             const hedgeResult = await executeHedgingStrategy(
@@ -755,8 +759,14 @@ app.get("/api/kalshi/market/:id", async (req, res) => {
         const noBid = marketData.no_bid || market.no_bid || 0;
         const noAsk = marketData.no_ask || market.no_ask || 0;
         
+        // Calculate mid price for internal calculations (average of bid and ask)
         const yesMid = (yesBid && yesAsk) ? (yesBid + yesAsk) / 2 : (yesBid || yesAsk || 0);
         const noMid = (noBid && noAsk) ? (noBid + noAsk) / 2 : (noBid || noAsk || 0);
+        
+        // Use ask price for displayed probability (what users see when buying on Kalshi)
+        // Show one decimal place to match Kalshi's frontend precision
+        const yesProb = yesAsk || yesBid || 0;
+        const noProb = noAsk || noBid || 0;
         
         // Create option with YES/NO contracts
         // Use the full market ticker (e.g., "KXPRESPERSON-28-JVAN")
@@ -772,8 +782,8 @@ app.get("/api/kalshi/market/:id", async (req, res) => {
             ticker: fullTicker, // Kalshi ticker for API trading
             label: optionLabel,
             side: 'YES',
-            price: yesMid,
-            prob: Math.round(yesMid),
+            price: yesMid, // Keep mid price for internal calculations
+            prob: Math.round(yesProb * 10) / 10, // One decimal place, using ask price
             bid: yesBid,
             ask: yesAsk
           },
@@ -782,8 +792,8 @@ app.get("/api/kalshi/market/:id", async (req, res) => {
             ticker: fullTicker, // Kalshi ticker for API trading
             label: optionLabel,
             side: 'NO',
-            price: noMid,
-            prob: Math.round(noMid),
+            price: noMid, // Keep mid price for internal calculations
+            prob: Math.round(noProb * 10) / 10, // One decimal place, using ask price
             bid: noBid,
             ask: noAsk
           }
@@ -1112,20 +1122,34 @@ app.get("/api/stripe-connect/onboard/:userId", async (req, res) => {
     
     // Create Express account if doesn't exist
     if (!accountId) {
-      const account = await stripe.accounts.create({
-        type: 'express',
-        country: 'US',
-        email: userEmail, // Use authenticated user's email from Supabase
-        business_type: 'individual', // Pre-fill as individual (not business)
-        business_profile: {
-          product_description: 'Receiving payouts from parlay betting winnings', // Use product description instead of website
-        },
-        capabilities: {
-          transfers: { requested: true },
-        },
-      });
-      accountId = account.id;
-      await saveStripeAccount(userId, accountId, 'pending', token);
+      try {
+        const account = await stripe.accounts.create({
+          type: 'express',
+          country: 'US',
+          email: userEmail, // Use authenticated user's email from Supabase
+          business_type: 'individual', // Pre-fill as individual (not business)
+          business_profile: {
+            product_description: 'Receiving payouts from parlay betting winnings', // Use product description instead of website
+          },
+          capabilities: {
+            transfers: { requested: true },
+          },
+        });
+        accountId = account.id;
+        await saveStripeAccount(userId, accountId, 'pending', token);
+      } catch (createErr) {
+        // Check if error is about Connect not being enabled
+        if (createErr.message && createErr.message.includes('signed up for Connect')) {
+          logError("Stripe Connect not enabled", createErr);
+          return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+            error: "Stripe Connect is not enabled for your account",
+            message: "Please enable Stripe Connect in your Stripe Dashboard: https://dashboard.stripe.com/settings/connect",
+            details: "Go to Stripe Dashboard → Settings → Connect → Enable Connect"
+          });
+        }
+        // Re-throw other errors
+        throw createErr;
+      }
     } else {
       // Update existing account email if it's still using placeholder
       try {
@@ -1193,9 +1217,25 @@ app.get("/api/stripe-connect/onboard/:userId", async (req, res) => {
     });
   } catch (err) {
     logError("Error creating Stripe Connect account", err);
+    
+    // Provide helpful error messages for common issues
+    let errorMessage = "Failed to create account";
+    let errorDetails = err.message;
+    
+    if (err.message && err.message.includes('signed up for Connect')) {
+      errorMessage = "Stripe Connect is not enabled";
+      errorDetails = "Please enable Stripe Connect in your Stripe Dashboard. Go to Settings → Connect → Enable Connect";
+    } else if (err.message && err.message.includes('Invalid API Key')) {
+      errorMessage = "Invalid Stripe API key";
+      errorDetails = "Please check your STRIPE_API_KEY or STRIPE_DEMO_API_KEY in .env";
+    }
+    
     res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Failed to create account", 
-      details: err.message 
+      error: errorMessage, 
+      details: errorDetails,
+      helpUrl: err.message && err.message.includes('signed up for Connect') 
+        ? "https://dashboard.stripe.com/settings/connect"
+        : undefined
     });
   }
 });
@@ -1363,8 +1403,11 @@ app.post("/api/withdraw/:userId", async (req, res) => {
       
       if (platformBalance < Math.round(amount * 100)) {
         logError(`Platform account has insufficient funds: $${(platformBalance / 100).toFixed(2)} < $${amount.toFixed(2)}`);
+        const errorMsg = ENV.IS_PRODUCTION
+          ? `Insufficient funds in platform account. Platform has $${(platformBalance / 100).toFixed(2)}, need $${amount.toFixed(2)}.`
+          : `Insufficient funds in platform account. Platform has $${(platformBalance / 100).toFixed(2)}, need $${amount.toFixed(2)}. This is a test mode limitation. In production, funds from credit purchases will be available.`;
         return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-          error: `Insufficient funds in platform account. Platform has $${(platformBalance / 100).toFixed(2)}, need $${amount.toFixed(2)}. This is a test mode limitation. In production, funds from credit purchases will be available.`,
+          error: errorMsg,
           details: `Platform balance: $${(platformBalance / 100).toFixed(2)}, Required: $${amount.toFixed(2)}`
         });
       }
@@ -1418,7 +1461,9 @@ app.post("/api/withdraw/:userId", async (req, res) => {
       // Check if it's a Stripe error about insufficient funds
       let errorMessage = "Failed to process withdrawal";
       if (transferErr.message && transferErr.message.includes("insufficient available funds")) {
-        errorMessage = `Insufficient funds in platform account. Platform has $${platformBalance ? (platformBalance / 100).toFixed(2) : 'unknown'}, need $${amount.toFixed(2)}. This is a test mode limitation.`;
+        errorMessage = ENV.IS_PRODUCTION
+          ? `Insufficient funds in platform account. Platform has $${platformBalance ? (platformBalance / 100).toFixed(2) : 'unknown'}, need $${amount.toFixed(2)}.`
+          : `Insufficient funds in platform account. Platform has $${platformBalance ? (platformBalance / 100).toFixed(2) : 'unknown'}, need $${amount.toFixed(2)}. This is a test mode limitation.`;
       } else if (transferErr.message) {
         errorMessage = transferErr.message;
       }
@@ -1458,7 +1503,9 @@ app.post("/api/withdraw/:userId", async (req, res) => {
     // Check if it's a Stripe error about insufficient funds
     let errorMessage = "Failed to process withdrawal";
     if (err.message && err.message.includes("insufficient available funds")) {
-      errorMessage = "Insufficient funds in platform account. This is a test mode limitation. In production, funds from credit purchases will be available for withdrawals.";
+      errorMessage = ENV.IS_PRODUCTION
+        ? "Insufficient funds in platform account."
+        : "Insufficient funds in platform account. This is a test mode limitation. In production, funds from credit purchases will be available for withdrawals.";
     } else if (err.message) {
       errorMessage = err.message;
     }
@@ -1956,8 +2003,8 @@ app.post("/api/create-checkout-session", async (req, res) => {
         },
       ],
       mode: CONFIG.STRIPE.PAYMENT_MODE,
-      success_url: `http://localhost:${PORT}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `http://localhost:${PORT}/payment-cancel`,
+      success_url: `${ENV.BACKEND_BASE_URL || `http://localhost:${PORT}`}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${ENV.BACKEND_BASE_URL || `http://localhost:${PORT}`}/payment-cancel`,
       metadata: {
         userId,
         stake: stake.toString(),
@@ -2050,8 +2097,8 @@ app.post("/api/buy-credits", async (req, res) => {
         },
       ],
       mode: CONFIG.STRIPE.PAYMENT_MODE,
-      success_url: `http://localhost:${PORT}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `http://localhost:${PORT}/payment-cancel`,
+      success_url: `${ENV.BACKEND_BASE_URL || `http://localhost:${PORT}`}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${ENV.BACKEND_BASE_URL || `http://localhost:${PORT}`}/payment-cancel`,
       metadata: {
         userId,
         amount: amount.toString(),
@@ -2198,7 +2245,7 @@ app.post("/api/place-parlay", async (req, res) => {
         );
         
         // Execute hedging strategy
-        logInfo(`Executing orders on Kalshi demo environment...`);
+        logInfo(`Executing orders on Kalshi ${ENV.IS_PRODUCTION ? 'production' : 'demo'} environment...`);
         logInfo(`DRY_RUN: ${ENV.KALSHI_DRY_RUN ? 'ENABLED (TESTING)' : 'DISABLED (REAL ORDERS)'}`);
         
         const hedgeResult = await executeHedgingStrategy(

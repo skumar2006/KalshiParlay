@@ -1,24 +1,70 @@
 console.log("[ContentScript] ✅ Script loaded on:", window.location.href);
 
 function extractMarketTitle() {
-  // Try a few strategies to infer the market title.
-
-  // 1. Look for a prominent heading that might represent the market title.
-  const headingSelectors = ["h1", "h2", '[data-testid*="market-title"]'];
-  for (const selector of headingSelectors) {
+  // Try multiple strategies to find the actual market question
+  
+  // Strategy 1: Look for the main market question - usually contains a question mark
+  // and is in the main content area, not sidebar
+  const mainContent = document.querySelector('main') || document.body;
+  const questionElements = mainContent.querySelectorAll('h1, h2, [data-testid*="market"], [class*="market-title"], [class*="question"]');
+  
+  for (const el of questionElements) {
+    const text = el.textContent.trim();
+    // Market questions typically contain question marks or are the main heading
+    if (text && (text.includes('?') || el.tagName === 'H1')) {
+      // Make sure it's not in a sidebar or navigation
+      const isInSidebar = el.closest('[class*="sidebar"]') || el.closest('[class*="nav"]') || el.closest('[class*="menu"]');
+      if (!isInSidebar && text.length > 10) {
+        console.log("[ContentScript] Found market question:", text);
+        return text;
+      }
+    }
+  }
+  
+  // Strategy 2: Look for the first h1 in main content (most likely the market question)
+  const mainH1 = mainContent.querySelector('h1');
+  if (mainH1) {
+    const text = mainH1.textContent.trim();
+    if (text && text.length > 0) {
+      console.log("[ContentScript] Found main h1:", text);
+      return text;
+    }
+  }
+  
+  // Strategy 3: Look for data-testid attributes that might indicate market title
+  const testIdSelectors = [
+    '[data-testid*="market-title"]',
+    '[data-testid*="market-question"]',
+    '[data-testid*="question"]'
+  ];
+  for (const selector of testIdSelectors) {
     const el = document.querySelector(selector);
-    if (el && el.textContent.trim().length > 0) {
-      return el.textContent.trim();
+    if (el) {
+      const text = el.textContent.trim();
+      if (text && text.length > 0) {
+        console.log("[ContentScript] Found via data-testid:", text);
+        return text;
+      }
     }
   }
 
-  // 2. Fall back to the document title, but clean it up a bit.
+  // Strategy 4: Fall back to the document title, but clean it up a bit.
   const rawTitle = document.title || "";
   const sepIdx = rawTitle.indexOf(" - ");
   if (sepIdx > 0) {
-    return rawTitle.slice(0, sepIdx);
+    const title = rawTitle.slice(0, sepIdx).trim();
+    console.log("[ContentScript] Using document title:", title);
+    return title;
   }
-  return rawTitle.trim() || "Unknown Kalshi market";
+  
+  const title = rawTitle.trim();
+  if (title) {
+    console.log("[ContentScript] Using full document title:", title);
+    return title;
+  }
+  
+  console.warn("[ContentScript] Could not find market title");
+  return "Unknown Kalshi market";
 }
 
 function extractMarketImage() {
