@@ -96,6 +96,8 @@ async function verifyAuth(req, res, next) {
   if (path === '/' ||
       path === '/api/webhook' || 
       path === CONFIG.SERVER.HEALTH_CHECK_PATH ||
+      path === '/api/health' ||
+      path === '/health' ||
       path === '/api/webhook/test' ||
       path === '/api/config' ||
       path === '/auth/callback' ||
@@ -634,8 +636,12 @@ initializeDatabase().catch(err => {
 
 /**
  * Health check endpoint
- * @route GET /api/health
+ * @route GET /api/health or /health
  */
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, timestamp: new Date().toISOString() });
+});
+
 app.get(CONFIG.SERVER.HEALTH_CHECK_PATH, (_req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });

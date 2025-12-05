@@ -28,9 +28,9 @@ async function loadBackendConfig() {
     if (!res.ok) {
       // If localhost fails, try common production URLs
       const productionUrls = [
+        'https://kalshiparlay-production.up.railway.app',
         'https://kalshi-parlay-production.up.railway.app',
         'https://kalshi-parlay.railway.app',
-        // Add your actual Railway URL here
       ];
       
       for (const url of productionUrls) {
