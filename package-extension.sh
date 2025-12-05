@@ -14,7 +14,8 @@ cp popup.js extension-build/
 cp popup.css extension-build/
 cp contentScript.js extension-build/
 cp supabase.js extension-build/
-cp -r public/ extension-build/
+# Copy public folder (preserve folder structure - no trailing slash)
+cp -r public extension-build/
 
 # Create ZIP file
 cd extension-build

@@ -23,38 +23,63 @@ async function loadBackendConfig() {
       console.log(`[Config] Using stored backend URL: ${BACKEND_BASE_URL}`);
     }
     
-    // Fetch config from backend (will use stored URL or fallback to localhost)
-    const res = await fetch(`${BACKEND_BASE_URL}/api/config`);
-    if (!res.ok) {
-      // If localhost fails, try common production URLs
-      const productionUrls = [
-        'https://kalshiparlay-production.up.railway.app',
-        'https://kalshi-parlay-production.up.railway.app',
-        'https://kalshi-parlay.railway.app',
-      ];
-      
-      for (const url of productionUrls) {
-        try {
-          const prodRes = await fetch(`${url}/api/config`);
-          if (prodRes.ok) {
-            BACKEND_BASE_URL = url;
-            await chrome.storage.sync.set({ backendUrl: url });
-            console.log(`[Config] Found production backend: ${BACKEND_BASE_URL}`);
-            res = prodRes;
-            break;
+    // Try production URLs first (more reliable than localhost)
+    const productionUrls = [
+      'https://kalshiparlay-production.up.railway.app',
+      'https://kalshi-parlay-production.up.railway.app',
+      'https://kalshi-parlay.railway.app',
+    ];
+    
+    let res = null;
+    let lastError = null;
+    
+    // Try production URLs first
+    for (const url of productionUrls) {
+      try {
+        console.log(`[Config] Trying backend URL: ${url}`);
+        const prodRes = await fetch(`${url}/api/config`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json'
           }
-        } catch (e) {
-          // Try next URL
-          continue;
+        });
+        if (prodRes.ok) {
+          BACKEND_BASE_URL = url;
+          await chrome.storage.sync.set({ backendUrl: url });
+          console.log(`[Config] ✅ Found production backend: ${BACKEND_BASE_URL}`);
+          res = prodRes;
+          break;
+        } else {
+          console.warn(`[Config] ❌ ${url} returned status ${prodRes.status}`);
         }
+      } catch (e) {
+        console.warn(`[Config] ❌ Failed to connect to ${url}:`, e.message);
+        lastError = e;
+        continue;
       }
-      
-      if (!res.ok) {
-        throw new Error(`Failed to load config: ${res.status}`);
+    }
+    
+    // If production URLs failed, try localhost (for local dev)
+    if (!res) {
+      console.log(`[Config] Trying localhost fallback: ${BACKEND_BASE_URL}`);
+      try {
+        res = await fetch(`${BACKEND_BASE_URL}/api/config`);
+        if (!res.ok) {
+          throw new Error(`Failed to load config: ${res.status}`);
+        }
+      } catch (e) {
+        console.error(`[Config] ❌ Localhost also failed:`, e.message);
+        throw new Error(`Failed to connect to any backend. Last error: ${lastError?.message || e.message}`);
       }
     }
     
     const backendConfig = await res.json();
+    console.log('[Config] Received config:', { 
+      hasSupabaseUrl: !!backendConfig.supabaseUrl,
+      hasSupabaseAnonKey: !!backendConfig.supabaseAnonKey,
+      backendUrl: backendConfig.backendUrl 
+    });
+    
     SUPABASE_URL = backendConfig.supabaseUrl;
     SUPABASE_ANON_KEY = backendConfig.supabaseAnonKey;
     
@@ -66,14 +91,19 @@ async function loadBackendConfig() {
     }
     
     if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-      console.warn('Supabase credentials not configured in backend. Please set SUPABASE_URL and SUPABASE_ANON_KEY in your .env file');
+      console.error('[Config] ❌ Supabase credentials missing from backend config');
+      console.error('[Config] Received:', backendConfig);
       return false;
     }
     
+    console.log('[Config] ✅ Supabase credentials loaded successfully');
     return true;
   } catch (err) {
-    console.error('Failed to load Supabase config:', err);
-    console.warn('Make sure your backend server is running and SUPABASE_URL/SUPABASE_ANON_KEY are set in .env');
+    console.error('[Config] ❌ Failed to load backend config:', err);
+    console.error('[Config] Error details:', {
+      message: err.message,
+      stack: err.stack
+    });
     return false;
   }
 }
@@ -349,10 +379,16 @@ async function login(email, password) {
 async function signup(email, password) {
   if (!supabase) throw new Error('Supabase not initialized');
   
+  // Get backend URL for email redirect (use production URL)
+  const backendUrl = BACKEND_BASE_URL || 'https://kalshiparlay-production.up.railway.app';
+  
   // Attempt signup - Supabase handles duplicates securely
   const { data, error } = await supabase.auth.signUp({
     email,
-    password
+    password,
+    options: {
+      emailRedirectTo: `${backendUrl}/auth/callback`
+    }
   });
   
   // Supabase returns success even for existing emails (security feature to prevent email enumeration)
