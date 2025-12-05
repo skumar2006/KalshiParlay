@@ -1111,7 +1111,8 @@ app.get("/api/stripe-connect/onboard/:userId", async (req, res) => {
   }
   
   const { userId } = req.params;
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  // Use BACKEND_BASE_URL if set, otherwise detect from request
+  const baseUrl = ENV.BACKEND_BASE_URL || `${req.protocol}://${req.get('host')}`;
   const returnUrl = `${baseUrl}/stripe-connect-return?userId=${userId}`;
   const refreshUrl = `${baseUrl}/stripe-connect-refresh?userId=${userId}`;
   
