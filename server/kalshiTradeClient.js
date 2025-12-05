@@ -25,6 +25,7 @@ const DRY_RUN = ENV.KALSHI_DRY_RUN !== false;
 
 /**
  * Normalize private key format (add PEM headers if missing)
+ * Handles various formats Railway might store the key in
  * 
  * @param {string} key - Private key string
  * @returns {string} Normalized PEM-formatted key
@@ -32,17 +33,46 @@ const DRY_RUN = ENV.KALSHI_DRY_RUN !== false;
 function normalizePrivateKey(key) {
   if (!key) return key;
   
-  // If key already has PEM headers, return as-is
+  // Remove any surrounding quotes (single, double, or backticks) that Railway might add
+  key = key.trim().replace(/^["'`]|["'`]$/g, '');
+  
+  // If key already has PEM headers, clean it up and return
   if (key.includes('-----BEGIN')) {
-    return key;
+    // Remove all extra whitespace/newlines but preserve structure
+    const lines = key.split('\n').filter(line => line.trim());
+    const beginIndex = lines.findIndex(line => line.includes('BEGIN'));
+    const endIndex = lines.findIndex(line => line.includes('END'));
+    
+    if (beginIndex !== -1 && endIndex !== -1) {
+      const header = lines[beginIndex].trim();
+      const footer = lines[endIndex].trim();
+      const body = lines.slice(beginIndex + 1, endIndex)
+        .map(line => line.trim())
+        .join('');
+      
+      // Reconstruct with proper formatting (64 chars per line for PEM)
+      const formattedBody = body.match(/.{1,64}/g)?.join('\n') || body;
+      return `${header}\n${formattedBody}\n${footer}`;
+    }
+    
+    // If parsing failed, try to clean up whitespace
+    return key.replace(/\s+/g, ' ').replace(/-----BEGIN /g, '-----BEGIN ').replace(/ -----END/g, '\n-----END');
   }
   
   // Otherwise, wrap it with PEM headers
-  // Remove any existing whitespace/newlines
-  const cleanKey = key.replace(/\s+/g, '');
+  // Remove ALL whitespace/newlines to get clean base64
+  const cleanKey = key.replace(/\s+/g, '').replace(/["'`]/g, '');
   
-  // Add PEM headers
-  return `-----BEGIN PRIVATE KEY-----\n${cleanKey}\n-----END PRIVATE KEY-----`;
+  // Validate it looks like base64
+  if (!/^[A-Za-z0-9+/=]+$/.test(cleanKey)) {
+    console.error('   ⚠️  WARNING: Private key contains invalid characters');
+    console.error(`      Key preview: ${cleanKey.substring(0, 100)}...`);
+  }
+  
+  // Use RSA PRIVATE KEY format (PKCS#1) - this is what Kalshi typically uses
+  // Format with 64 chars per line for proper PEM structure
+  const formattedKey = cleanKey.match(/.{1,64}/g)?.join('\n') || cleanKey;
+  return `-----BEGIN RSA PRIVATE KEY-----\n${formattedKey}\n-----END RSA PRIVATE KEY-----`;
 }
 
 /**
@@ -70,13 +100,39 @@ function generateKalshiSignature(timestamp, method, path, body = null) {
     throw new Error(`${envVar} not found in environment variables`);
   }
   
+  // Debug: Log key info (first/last 50 chars, length) - helps diagnose Railway storage issues
+  console.log(`\n   🔑 PRIVATE KEY DEBUG:`);
+  console.log(`      Key length: ${privateKey.length} chars`);
+  console.log(`      First 50 chars: ${privateKey.substring(0, 50).replace(/\n/g, '\\n')}`);
+  console.log(`      Last 50 chars: ${privateKey.substring(Math.max(0, privateKey.length - 50)).replace(/\n/g, '\\n')}`);
+  console.log(`      Has BEGIN header: ${privateKey.includes('BEGIN')}`);
+  console.log(`      Has END footer: ${privateKey.includes('END')}`);
+  console.log(`      Contains quotes: ${/["'`]/.test(privateKey)}`);
+  
   // Normalize key format (add PEM headers if needed)
+  const originalKey = privateKey;
   privateKey = normalizePrivateKey(privateKey);
+  
+  // Log normalization result
+  if (originalKey !== privateKey) {
+    console.log(`      ✅ Key normalized (added PEM headers)`);
+  }
   
   // Validate private key format
   if (!privateKey.includes('BEGIN PRIVATE KEY') && !privateKey.includes('BEGIN RSA PRIVATE KEY')) {
-    console.error(`   ⚠️  WARNING: Private key might not be in correct format`);
-    console.error(`      Key preview: ${privateKey.substring(0, 50)}...`);
+    console.error(`   ❌ ERROR: Private key format is invalid after normalization`);
+    console.error(`      Normalized key preview: ${privateKey.substring(0, 100)}...`);
+    throw new Error('Private key format is invalid - missing PEM headers after normalization');
+  }
+  
+  // Verify key can be parsed by crypto module
+  try {
+    crypto.createPrivateKey(privateKey);
+    console.log(`      ✅ Key format validated by crypto module`);
+  } catch (keyErr) {
+    console.error(`   ❌ ERROR: Key validation failed: ${keyErr.message}`);
+    console.error(`      This usually means the key format is still incorrect`);
+    throw new Error(`Private key validation failed: ${keyErr.message}`);
   }
   
   try {
