@@ -25,13 +25,40 @@ export async function generateParlayQuote(bets, stake) {
   
   const naivePayout = stake / naiveCombinedProb;
 
-  // Prepare bet descriptions for AI analysis
-  const betDescriptions = bets.map((bet, idx) => 
-    `${idx + 1}. ${bet.marketTitle} - Betting on: ${bet.optionLabel} (${bet.prob}% probability)`
-  ).join('\n');
+  // Prepare comprehensive bet descriptions for AI analysis
+  // Include all available information for better correlation assessment
+  const betDescriptions = bets.map((bet, idx) => {
+    let description = `${idx + 1}. Market: ${bet.marketTitle || 'Unknown'}`;
+    
+    if (bet.optionLabel) {
+      description += `\n   Option: ${bet.optionLabel}`;
+    }
+    
+    if (bet.ticker) {
+      description += `\n   Ticker: ${bet.ticker}`;
+    }
+    
+    if (bet.marketId) {
+      description += `\n   Market ID: ${bet.marketId}`;
+    }
+    
+    if (bet.side) {
+      description += `\n   Side: ${bet.side}`;
+    }
+    
+    if (bet.prob !== undefined && bet.prob !== null) {
+      description += `\n   Probability: ${bet.prob}%`;
+    }
+    
+    if (bet.marketUrl) {
+      description += `\n   URL: ${bet.marketUrl}`;
+    }
+    
+    return description;
+  }).join('\n\n');
 
-  // Create prompt for OpenAI
-  const prompt = `You are an expert in probability theory and sports/prediction market correlations. Analyze this parlay bet for event correlation and provide a fair payout percentage.
+  // Create comprehensive prompt for OpenAI with all available context
+  const prompt = `You are an expert in probability theory and prediction market correlations. Analyze this parlay bet for event correlation and provide a fair payout percentage.
 
 PARLAY DETAILS:
 ${betDescriptions}
@@ -39,6 +66,12 @@ ${betDescriptions}
 Stake Amount: $${stake}
 Naive Combined Probability (assuming independence): ${(naiveCombinedProb * 100).toFixed(2)}%
 Naive Payout: $${naivePayout.toFixed(2)}
+
+ADDITIONAL CONTEXT:
+- Market tickers can help identify if bets are from the same event/series (e.g., "KXPRESPERSON-28-*" indicates same election event)
+- Market IDs and URLs provide context about the specific markets
+- Option labels show the specific outcomes being bet on
+- Use all available information to assess correlation more accurately
 
 ANALYSIS REQUIRED:
 1. Determine if these events are correlated (positively, negatively, or independent)
@@ -112,7 +145,12 @@ If naive probability is 10% (naive payout $100):
         bets: bets.map(b => ({
           market: b.marketTitle,
           option: b.optionLabel,
-          probability: b.prob
+          probability: b.prob,
+          ticker: b.ticker || null,
+          marketId: b.marketId || null,
+          side: b.side || null,
+          marketUrl: b.marketUrl || null,
+          imageUrl: b.imageUrl || null
         })),
         analysis: {
           naiveCombinedProbability: (naiveCombinedProb * 100).toFixed(2) + '%',

@@ -13,7 +13,8 @@ dotenv.config();
  */
 export function validateEnvironment() {
   const required = [
-    'DATABASE_URL',
+    'SUPABASE_URL',
+    'SUPABASE_SERVICE_ROLE_KEY',
   ];
 
   const missing = required.filter(key => !process.env[key]);
@@ -27,6 +28,8 @@ export function validateEnvironment() {
 
   // Warn about optional but recommended variables
   const recommended = [
+    'DATABASE_URL', // Optional - can use Supabase connection string
+    'SUPABASE_ANON_KEY', // Optional - for frontend use
     'KALSHI_API_KEY',
     'KALSHI_DEMO_API_KEY',
     'KALSHI_DEMO_PRIVATE_KEY',
@@ -83,16 +86,25 @@ export function getEnvInt(key, defaultValue = undefined) {
 export const ENV = {
   NODE_ENV: getEnv('NODE_ENV', 'development'),
   PORT: getEnvInt('PORT', 4000),
-  DATABASE_URL: getEnv('DATABASE_URL'),
+  // Supabase configuration
+  SUPABASE_URL: getEnv('SUPABASE_URL'),
+  SUPABASE_SERVICE_ROLE_KEY: getEnv('SUPABASE_SERVICE_ROLE_KEY'),
+  SUPABASE_ANON_KEY: getEnv('SUPABASE_ANON_KEY'),
+  DATABASE_URL: getEnv('DATABASE_URL'), // Optional - can use Supabase connection string
+  // Kalshi API configuration
   KALSHI_API_KEY: getEnv('KALSHI_API_KEY'),
   KALSHI_DEMO_API_KEY: getEnv('KALSHI_DEMO_API_KEY'),
   KALSHI_DEMO_PRIVATE_KEY: getEnv('KALSHI_DEMO_PRIVATE_KEY'),
   KALSHI_PRIVATE_KEY: getEnv('KALSHI_PRIVATE_KEY'),
   KALSHI_API_BASE_URL: getEnv('KALSHI_API_BASE_URL', 'https://api.elections.kalshi.com/trade-api/v2'),
+  // Stripe configuration
   STRIPE_API_KEY: getEnv('STRIPE_API_KEY'),
   STRIPE_WEBHOOK_SECRET: getEnv('STRIPE_WEBHOOK_SECRET'),
+  // OpenAI configuration
   OPENAI_API_KEY: getEnv('OPENAI_API_KEY'),
+  // Feature flags
   KALSHI_DRY_RUN: getEnvBool('KALSHI_DRY_RUN', true),
   VERBOSE_HEDGING: getEnvBool('VERBOSE_HEDGING', false),
 };
+
 

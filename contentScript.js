@@ -52,15 +52,37 @@ function extractMarketImage() {
   return null;
 }
 
+// Option names are now provided by the API - no DOM extraction needed
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message && message.type === "GET_MARKET_INFO") {
-    console.log("[ContentScript] Received GET_MARKET_INFO request");
-    const marketTitle = extractMarketTitle();
-    const marketImageUrl = extractMarketImage();
-    console.log("[ContentScript] Sending response:", { marketTitle, marketImageUrl });
-    sendResponse({ marketTitle, marketImageUrl });
+  try {
+    if (message && message.type === "GET_MARKET_INFO") {
+      console.log("[ContentScript] Received GET_MARKET_INFO request - extracting title and image only");
+      
+      // Only extract title and image - option names come from API
+      // This avoids any DOM queries that could cause screen control issues
+      const marketTitle = extractMarketTitle();
+      const marketImageUrl = extractMarketImage();
+      
+      console.log("[ContentScript] Sending response (option names from API):", { 
+        marketTitle, 
+        marketImageUrl, 
+        optionNames: [] 
+      });
+      
+      sendResponse({ 
+        marketTitle, 
+        marketImageUrl, 
+        optionNames: [] // Empty - API provides all option names
+      });
+      return true;
+    }
+  } catch (error) {
+    console.error("[ContentScript] Error in message listener:", error);
+    sendResponse({ marketTitle: null, marketImageUrl: null, optionNames: [] });
+    return true;
   }
-  return true; // Keep the message channel open for async response
+  return true;
 });
 
 

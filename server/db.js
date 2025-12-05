@@ -1,240 +1,152 @@
 /**
  * Database Module
- * Handles all PostgreSQL database operations for the Kalshi Parlay Helper
+ * Handles all Supabase database operations for the Kalshi Parlay Helper
  */
 
-import pkg from 'pg';
-const { Pool } = pkg;
-import { ENV, getEnvBool } from '../config/env.js';
-import { CONFIG } from '../config/constants.js';
+import { createClient } from '@supabase/supabase-js';
+import { ENV } from '../config/env.js';
 import { logError, logInfo } from './utils/logger.js';
 
-const pool = new Pool({
-  connectionString: ENV.DATABASE_URL,
-  ssl: ENV.NODE_ENV === 'production' 
-    ? { rejectUnauthorized: false } 
-    : false  // Disable SSL for local development
-});
+/**
+ * Create a Supabase client with user's JWT token
+ * This respects RLS policies - users can only access their own data
+ * @param {string} userToken - JWT token from authenticated user
+ * @returns {SupabaseClient} Supabase client configured with user's token
+ */
+function getSupabaseClient(userToken) {
+  if (!userToken) {
+    throw new Error('User token is required to create Supabase client');
+  }
+  
+  return createClient(
+    ENV.SUPABASE_URL,
+    ENV.SUPABASE_ANON_KEY, // Use anon key, not service role
+    {
+      global: {
+        headers: {
+          Authorization: `Bearer ${userToken}`
+        }
+      },
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    }
+  );
+}
+
+// Service role client only for initialization/health checks
+// Should NOT be used for user operations - use getSupabaseClient(userToken) instead
+let serviceRoleClient = null;
+if (ENV.SUPABASE_SERVICE_ROLE_KEY) {
+  serviceRoleClient = createClient(
+    ENV.SUPABASE_URL,
+    ENV.SUPABASE_SERVICE_ROLE_KEY,
+    {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    }
+  );
+}
 
 /**
- * Initialize database tables and indexes
- * Creates all required tables if they don't exist
- * @throws {Error} If database initialization fails
+ * Initialize database connection
+ * Note: Tables should be created manually in Supabase dashboard
+ * This function just verifies the connection
+ * @throws {Error} If database connection fails
  */
 export async function initializeDatabase() {
-  const client = await pool.connect();
-  
   try {
-    logInfo('Initializing database tables...');
+    logInfo('Verifying Supabase connection...');
     
-    // Create users table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        user_id VARCHAR(255) UNIQUE NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    
-    // Create parlay_bets table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS parlay_bets (
-        id SERIAL PRIMARY KEY,
-        user_id VARCHAR(255) NOT NULL,
-        market_id VARCHAR(255) NOT NULL,
-        market_title TEXT NOT NULL,
-        market_url TEXT,
-        image_url TEXT,
-        option_id VARCHAR(255) NOT NULL,
-        option_label VARCHAR(255) NOT NULL,
-        prob DECIMAL(5, 2),
-        ticker VARCHAR(255),
-        environment VARCHAR(20) DEFAULT 'production',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-      );
-    `);
-    
-    // Add environment column if it doesn't exist (migration for existing databases)
-    try {
-      await client.query(`
-        ALTER TABLE parlay_bets ADD COLUMN IF NOT EXISTS environment VARCHAR(20) DEFAULT 'production';
-      `);
-      logInfo('Environment column added/verified');
-    } catch (err) {
-      if (!err.message.includes('already exists')) {
-        logError('Warning adding environment column', err);
-      }
+    // Use service role client for health checks only
+    const client = serviceRoleClient;
+    if (!client) {
+      throw new Error('Service role client not initialized. SUPABASE_SERVICE_ROLE_KEY is required for initialization.');
     }
     
-    // Create index for faster lookups
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_parlay_bets_user_id ON parlay_bets(user_id);
-    `);
+    // Test connection by querying a simple table
+    // If tables don't exist yet, this will fail gracefully
+    const { error } = await client
+      .from('users')
+      .select('id')
+      .limit(1);
     
-    // Add ticker column if it doesn't exist (migration for existing databases)
-    try {
-      await client.query(`
-        ALTER TABLE parlay_bets ADD COLUMN IF NOT EXISTS ticker VARCHAR(255);
-      `);
-      logInfo('Ticker column added/verified');
-    } catch (err) {
-      // Column might already exist, that's okay
-      if (!err.message.includes('already exists')) {
-        logError('Warning adding ticker column', err);
-      }
+    if (error && error.code !== 'PGRST116') { // PGRST116 = table doesn't exist
+      logError('Supabase connection error', error);
+      throw error;
     }
     
-    // Create pending_payments table for Stripe sessions
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS pending_payments (
-        id SERIAL PRIMARY KEY,
-        session_id VARCHAR(255) UNIQUE NOT NULL,
-        user_id VARCHAR(255) NOT NULL,
-        stake DECIMAL(10, 2) NOT NULL,
-        parlay_data JSONB NOT NULL,
-        quote_data JSONB,
-        status VARCHAR(50) DEFAULT 'pending',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-      );
-    `);
-    
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_pending_payments_session_id ON pending_payments(session_id);
-    `);
-    
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_pending_payments_user_id ON pending_payments(user_id);
-    `);
-    
-    // Create completed_purchases table for confirmed payments
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS completed_purchases (
-        id SERIAL PRIMARY KEY,
-        session_id VARCHAR(255) UNIQUE NOT NULL,
-        user_id VARCHAR(255) NOT NULL,
-        stake DECIMAL(10, 2) NOT NULL,
-        payout DECIMAL(10, 2) NOT NULL,
-        parlay_data JSONB NOT NULL,
-        quote_data JSONB,
-        hedging_strategy JSONB,
-        stripe_amount DECIMAL(10, 2) NOT NULL,
-        payment_status VARCHAR(50) DEFAULT 'completed',
-        hedge_executed BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-      );
-    `);
-    
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_completed_purchases_user_id ON completed_purchases(user_id);
-    `);
-    
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_completed_purchases_session_id ON completed_purchases(session_id);
-    `);
-    
-    // Add parlay status columns to completed_purchases
-    try {
-      await client.query(`
-        ALTER TABLE completed_purchases 
-        ADD COLUMN IF NOT EXISTS parlay_status VARCHAR(50) DEFAULT 'pending';
-      `);
-      await client.query(`
-        ALTER TABLE completed_purchases 
-        ADD COLUMN IF NOT EXISTS claimable_amount DECIMAL(10, 2) DEFAULT 0;
-      `);
-      await client.query(`
-        ALTER TABLE completed_purchases 
-        ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP;
-      `);
-      await client.query(`
-        ALTER TABLE completed_purchases 
-        ADD COLUMN IF NOT EXISTS last_status_check TIMESTAMP;
-      `);
-      logInfo('Parlay status columns added/verified');
+    logInfo('Supabase connection verified successfully');
     } catch (err) {
-      if (!err.message.includes('already exists')) {
-        logError('Warning adding parlay status columns', err);
-      }
-    }
-    
-    // Create parlay_bet_outcomes table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS parlay_bet_outcomes (
-        id SERIAL PRIMARY KEY,
-        purchase_id INTEGER NOT NULL REFERENCES completed_purchases(id) ON DELETE CASCADE,
-        leg_number INTEGER NOT NULL,
-        ticker VARCHAR(255) NOT NULL,
-        option_id VARCHAR(255) NOT NULL,
-        market_status VARCHAR(50) DEFAULT 'open',
-        outcome VARCHAR(50),
-        settlement_price DECIMAL(5, 2),
-        checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        settled_at TIMESTAMP,
-        UNIQUE(purchase_id, leg_number)
-      );
-    `);
-    
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_parlay_bet_outcomes_purchase_id ON parlay_bet_outcomes(purchase_id);
-    `);
-    
-    // Create user_wallet table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS user_wallet (
-        user_id VARCHAR(255) PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
-        balance DECIMAL(10, 2) DEFAULT 0,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    
-    // Create withdrawal_requests table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS withdrawal_requests (
-        id SERIAL PRIMARY KEY,
-        user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-        amount DECIMAL(10, 2) NOT NULL,
-        status VARCHAR(50) DEFAULT 'pending',
-        payment_method VARCHAR(50),
-        stripe_payout_id VARCHAR(255),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        completed_at TIMESTAMP
-      );
-    `);
-    
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_user_id ON withdrawal_requests(user_id);
-    `);
-    
-    logInfo('Database initialized successfully');
-  } catch (err) {
-    logError('Error initializing database', err);
+    logError('Error verifying Supabase connection', err);
     throw err;
-  } finally {
-    client.release();
   }
 }
 
 /**
  * Get or create a user in the database
- * @param {string} userId - Unique user identifier
+ * @param {string} userId - UUID from Supabase Auth
+ * @param {string} userToken - JWT token from authenticated user
  * @returns {Promise<Object>} User object
  */
-export async function getOrCreateUser(userId) {
-  const client = await pool.connect();
-  
+export async function getOrCreateUser(userId, userToken) {
   try {
-    const result = await client.query(
-      'INSERT INTO users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING RETURNING *',
-      [userId]
-    );
-    return result.rows[0] || { user_id: userId };
-  } finally {
-    client.release();
+    // userId should now be UUID from Supabase Auth
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
+    
+    if (!isUUID) {
+      throw new Error('Invalid user ID format. Expected UUID from Supabase Auth.');
+    }
+    
+    if (!userToken) {
+      throw new Error('User token is required');
+    }
+    
+    const supabase = getSupabaseClient(userToken);
+    
+    // Check if user exists by UUID (id column)
+    const { data: existingUser, error: selectError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', userId)
+      .single();
+    
+    if (existingUser) {
+      return existingUser;
+    }
+    
+    // User doesn't exist, create it
+    // Note: RLS policy should allow users to insert their own record
+    const { data: newUser, error: insertError } = await supabase
+      .from('users')
+      .insert({
+        id: userId, // UUID from auth.users
+        user_id: userId // Keep for backward compatibility
+      })
+      .select()
+      .single();
+    
+    if (insertError) {
+      // If it's a unique constraint error, try to fetch again
+      if (insertError.code === '23505') {
+        const { data: user } = await supabase
+          .from('users')
+          .select('*')
+          .eq('id', userId)
+          .single();
+        return user || { id: userId, user_id: userId };
+      }
+      logError('Error creating user', insertError);
+      throw insertError;
+    }
+    
+    return newUser || { id: userId, user_id: userId };
+  } catch (err) {
+    logError('Error in getOrCreateUser', err);
+    throw err;
   }
 }
 
@@ -242,27 +154,33 @@ export async function getOrCreateUser(userId) {
  * Get all parlay bets for a user (optionally filtered by environment)
  * @param {string} userId - User identifier
  * @param {string} environment - Optional environment filter ('demo' or 'production')
+ * @param {string} userToken - JWT token from authenticated user
  * @returns {Promise<Array>} Array of parlay bet objects
  */
-export async function getParlayBets(userId, environment = null) {
-  const client = await pool.connect();
-  
+export async function getParlayBets(userId, environment = null, userToken) {
   try {
-    let query = `SELECT id, market_id, market_title, market_url, image_url, option_id, option_label, prob, ticker, environment, created_at
-       FROM parlay_bets
-       WHERE user_id = $1`;
-    const params = [userId];
+    if (!userToken) {
+      throw new Error('User token is required');
+    }
+    const supabase = getSupabaseClient(userToken);
+    let query = supabase
+      .from('parlay_bets')
+      .select('id, market_id, market_title, market_url, image_url, option_id, option_label, prob, ticker, side, environment, created_at')
+      .eq('user_uuid', userId)
+      .order('created_at', { ascending: true });
     
     if (environment) {
-      query += ` AND environment = $2`;
-      params.push(environment);
+      query = query.eq('environment', environment);
     }
     
-    query += ` ORDER BY created_at ASC`;
+    const { data, error } = await query;
     
-    const result = await client.query(query, params);
+    if (error) {
+      logError('Error fetching parlay bets', error);
+      throw error;
+    }
     
-    return result.rows.map(row => ({
+    return (data || []).map(row => ({
       id: row.id,
       marketId: row.market_id,
       marketTitle: row.market_title,
@@ -270,12 +188,14 @@ export async function getParlayBets(userId, environment = null) {
       imageUrl: row.image_url,
       optionId: row.option_id,
       optionLabel: row.option_label,
-      prob: parseFloat(row.prob),
+      side: row.side || null,
+      prob: parseFloat(row.prob || 0),
       ticker: row.ticker,
       environment: row.environment || 'production'
     }));
-  } finally {
-    client.release();
+  } catch (err) {
+    logError('Error in getParlayBets', err);
+    throw err;
   }
 }
 
@@ -283,20 +203,24 @@ export async function getParlayBets(userId, environment = null) {
  * Add a bet to the user's parlay
  * @param {string} userId - User identifier
  * @param {Object} bet - Bet object with market and option details
+ * @param {string} userToken - JWT token from authenticated user
  * @returns {Promise<Object>} Created bet object with database ID
  */
-export async function addParlayBet(userId, bet) {
-  const client = await pool.connect();
-  
+export async function addParlayBet(userId, bet, userToken) {
   try {
+    if (!userToken) {
+      throw new Error('User token is required');
+    }
+    const supabase = getSupabaseClient(userToken);
+    
     // Ensure user exists
-    await getOrCreateUser(userId);
+    await getOrCreateUser(userId, userToken);
     
     // Validate environment - prevent mixing demo and production bets
     const environment = bet.environment || 'production';
     
     // Check if user has bets from different environment
-    const existingBets = await getParlayBets(userId);
+    const existingBets = await getParlayBets(userId, null, userToken);
     if (existingBets.length > 0) {
       const existingEnv = existingBets[0].environment || 'production';
       if (existingEnv !== environment) {
@@ -304,27 +228,46 @@ export async function addParlayBet(userId, bet) {
       }
     }
     
-    const result = await client.query(
-      `INSERT INTO parlay_bets (user_id, market_id, market_title, market_url, image_url, option_id, option_label, prob, ticker, environment)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       RETURNING *`,
-      [userId, bet.marketId, bet.marketTitle, bet.marketUrl, bet.imageUrl, bet.optionId, bet.optionLabel, bet.prob, bet.ticker, environment]
-    );
+    const { data, error } = await supabase
+      .from('parlay_bets')
+      .insert({
+        user_uuid: userId,
+        user_id: userId, // Keep for backward compatibility
+        market_id: bet.marketId,
+        market_title: bet.marketTitle,
+        market_url: bet.marketUrl || null,
+        image_url: bet.imageUrl || null,
+        option_id: bet.optionId,
+        option_label: bet.optionLabel,
+        prob: bet.prob,
+        ticker: bet.ticker || null,
+        side: bet.side || null,
+        environment: environment
+      })
+      .select()
+      .single();
+    
+    if (error) {
+      logError('Error adding parlay bet', error);
+      throw error;
+    }
     
     return {
-      id: result.rows[0].id,
-      marketId: result.rows[0].market_id,
-      marketTitle: result.rows[0].market_title,
-      marketUrl: result.rows[0].market_url,
-      imageUrl: result.rows[0].image_url,
-      optionId: result.rows[0].option_id,
-      optionLabel: result.rows[0].option_label,
-      prob: parseFloat(result.rows[0].prob),
-      ticker: result.rows[0].ticker,
-      environment: result.rows[0].environment || 'production'
+      id: data.id,
+      marketId: data.market_id,
+      marketTitle: data.market_title,
+      marketUrl: data.market_url,
+      imageUrl: data.image_url,
+      optionId: data.option_id,
+      optionLabel: data.option_label,
+      prob: parseFloat(data.prob || 0),
+      ticker: data.ticker,
+      side: data.side || null,
+      environment: data.environment || 'production'
     };
-  } finally {
-    client.release();
+  } catch (err) {
+    logError('Error in addParlayBet', err);
+    throw err;
   }
 }
 
@@ -332,36 +275,55 @@ export async function addParlayBet(userId, bet) {
  * Remove a bet from the user's parlay
  * @param {string} userId - User identifier
  * @param {number} betId - Bet ID to remove
+ * @param {string} userToken - JWT token from authenticated user
  * @returns {Promise<void>}
  */
-export async function removeParlayBet(userId, betId) {
-  const client = await pool.connect();
-  
+export async function removeParlayBet(userId, betId, userToken) {
   try {
-    await client.query(
-      'DELETE FROM parlay_bets WHERE id = $1 AND user_id = $2',
-      [betId, userId]
-    );
-  } finally {
-    client.release();
+    if (!userToken) {
+      throw new Error('User token is required');
+    }
+    const supabase = getSupabaseClient(userToken);
+    const { error } = await supabase
+      .from('parlay_bets')
+      .delete()
+      .eq('id', betId)
+      .eq('user_uuid', userId);
+    
+    if (error) {
+      logError('Error removing parlay bet', error);
+      throw error;
+    }
+  } catch (err) {
+    logError('Error in removeParlayBet', err);
+    throw err;
   }
 }
 
 /**
  * Clear all parlay bets for a user
  * @param {string} userId - User identifier
+ * @param {string} userToken - JWT token from authenticated user
  * @returns {Promise<void>}
  */
-export async function clearParlayBets(userId) {
-  const client = await pool.connect();
-  
+export async function clearParlayBets(userId, userToken) {
   try {
-    await client.query(
-      'DELETE FROM parlay_bets WHERE user_id = $1',
-      [userId]
-    );
-  } finally {
-    client.release();
+    if (!userToken) {
+      throw new Error('User token is required');
+    }
+    const supabase = getSupabaseClient(userToken);
+    const { error } = await supabase
+      .from('parlay_bets')
+      .delete()
+      .eq('user_uuid', userId);
+    
+    if (error) {
+      logError('Error clearing parlay bets', error);
+      throw error;
+    }
+  } catch (err) {
+    logError('Error in clearParlayBets', err);
+    throw err;
   }
 }
 
@@ -370,26 +332,42 @@ export async function clearParlayBets(userId) {
  * @param {string} sessionId - Stripe checkout session ID
  * @param {string} userId - User identifier
  * @param {number} stake - Stake amount
- * @param {Array} parlayData - Array of parlay bet objects
- * @param {Object} quoteData - Quote data from AI service
+ * @param {Array|null} parlayData - Array of parlay bet objects (null for credit purchases)
+ * @param {Object|null} quoteData - Quote data from AI service (null for credit purchases)
+ * @param {string} paymentType - Payment type: 'parlay' or 'credits'
  * @returns {Promise<Object>} Saved payment record
  */
-export async function savePendingPayment(sessionId, userId, stake, parlayData, quoteData) {
-  const client = await pool.connect();
-  
+export async function savePendingPayment(sessionId, userId, stake, parlayData, quoteData, paymentType = 'parlay', userToken) {
   try {
-    await getOrCreateUser(userId);
+    if (!userToken) {
+      throw new Error('User token is required');
+    }
+    const supabase = getSupabaseClient(userToken);
+    await getOrCreateUser(userId, userToken);
     
-    const result = await client.query(
-      `INSERT INTO pending_payments (session_id, user_id, stake, parlay_data, quote_data)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING *`,
-      [sessionId, userId, stake, JSON.stringify(parlayData), JSON.stringify(quoteData)]
-    );
+    const { data, error } = await supabase
+      .from('pending_payments')
+      .insert({
+        session_id: sessionId,
+        user_uuid: userId,
+        user_id: userId, // Keep for backward compatibility
+        stake: stake,
+        parlay_data: parlayData ? parlayData : null,
+        quote_data: quoteData ? quoteData : null,
+        payment_type: paymentType
+      })
+      .select()
+      .single();
     
-    return result.rows[0];
-  } finally {
-    client.release();
+    if (error) {
+      logError('Error saving pending payment', error);
+      throw error;
+    }
+    
+    return data;
+  } catch (err) {
+    logError('Error in savePendingPayment', err);
+    throw err;
   }
 }
 
@@ -398,22 +376,31 @@ export async function savePendingPayment(sessionId, userId, stake, parlayData, q
  * @param {string} sessionId - Stripe checkout session ID
  * @returns {Promise<Object|null>} Payment record or null if not found
  */
-export async function getPendingPayment(sessionId) {
-  const client = await pool.connect();
-  
+export async function getPendingPayment(sessionId, userToken = null) {
   try {
-    const result = await client.query(
-      'SELECT * FROM pending_payments WHERE session_id = $1',
-      [sessionId]
-    );
+    // For webhooks, we might not have userToken - use service role in that case
+    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
+    if (!supabase) {
+      throw new Error('Either user token or service role key is required');
+    }
+    const { data, error } = await supabase
+      .from('pending_payments')
+      .select('*')
+      .eq('session_id', sessionId)
+      .single();
     
-    if (result.rows.length === 0) {
+    if (error) {
+      if (error.code === 'PGRST116') { // No rows returned
       return null;
+      }
+      logError('Error fetching pending payment', error);
+      throw error;
     }
     
-    return result.rows[0];
-  } finally {
-    client.release();
+    return data;
+  } catch (err) {
+    logError('Error in getPendingPayment', err);
+    throw err;
   }
 }
 
@@ -423,16 +410,28 @@ export async function getPendingPayment(sessionId) {
  * @param {string} status - New status ('pending', 'completed', etc.)
  * @returns {Promise<void>}
  */
-export async function updatePaymentStatus(sessionId, status) {
-  const client = await pool.connect();
-  
+export async function updatePaymentStatus(sessionId, status, userToken = null) {
   try {
-    await client.query(
-      'UPDATE pending_payments SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE session_id = $2',
-      [status, sessionId]
-    );
-  } finally {
-    client.release();
+    // For webhooks, we might not have userToken - use service role in that case
+    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
+    if (!supabase) {
+      throw new Error('Either user token or service role key is required');
+    }
+    const { error } = await supabase
+      .from('pending_payments')
+      .update({
+        status: status,
+        updated_at: new Date().toISOString()
+      })
+      .eq('session_id', sessionId);
+    
+    if (error) {
+      logError('Error updating payment status', error);
+      throw error;
+    }
+  } catch (err) {
+    logError('Error in updatePaymentStatus', err);
+    throw err;
   }
 }
 
@@ -448,30 +447,38 @@ export async function updatePaymentStatus(sessionId, status) {
  * @param {number} stripeAmount - Amount charged by Stripe
  * @returns {Promise<Object>} Saved purchase record
  */
-export async function saveCompletedPurchase(sessionId, userId, stake, payout, parlayData, quoteData, hedgingStrategy, stripeAmount) {
-  const client = await pool.connect();
-  
+export async function saveCompletedPurchase(sessionId, userId, stake, payout, parlayData, quoteData, hedgingStrategy, stripeAmount, userToken = null) {
   try {
-    const result = await client.query(
-      `INSERT INTO completed_purchases 
-       (session_id, user_id, stake, payout, parlay_data, quote_data, hedging_strategy, stripe_amount)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [
-        sessionId,
-        userId,
-        stake,
-        payout,
-        JSON.stringify(parlayData),
-        JSON.stringify(quoteData),
-        JSON.stringify(hedgingStrategy),
-        stripeAmount
-      ]
-    );
+    // For webhooks, we might not have userToken - use service role in that case
+    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
+    if (!supabase) {
+      throw new Error('Either user token or service role key is required');
+    }
+    const { data, error } = await supabase
+      .from('completed_purchases')
+      .insert({
+        session_id: sessionId,
+        user_uuid: userId,
+        user_id: userId, // Keep for backward compatibility
+        stake: stake,
+        payout: payout,
+        parlay_data: parlayData,
+        quote_data: quoteData,
+        hedging_strategy: hedgingStrategy,
+        stripe_amount: stripeAmount
+      })
+      .select()
+      .single();
     
-    return result.rows[0];
-  } finally {
-    client.release();
+    if (error) {
+      logError('Error saving completed purchase', error);
+      throw error;
+    }
+    
+    return data;
+  } catch (err) {
+    logError('Error in saveCompletedPurchase', err);
+    throw err;
   }
 }
 
@@ -480,18 +487,31 @@ export async function saveCompletedPurchase(sessionId, userId, stake, payout, pa
  * @param {string} sessionId - Stripe checkout session ID
  * @returns {Promise<Object|null>} Purchase record or null if not found
  */
-export async function getCompletedPurchase(sessionId) {
-  const client = await pool.connect();
-  
+export async function getCompletedPurchase(sessionId, userToken = null) {
   try {
-    const result = await client.query(
-      'SELECT * FROM completed_purchases WHERE session_id = $1',
-      [sessionId]
-    );
+    // For webhooks, we might not have userToken - use service role in that case
+    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
+    if (!supabase) {
+      throw new Error('Either user token or service role key is required');
+    }
+    const { data, error } = await supabase
+      .from('completed_purchases')
+      .select('*')
+      .eq('session_id', sessionId)
+      .single();
     
-    return result.rows[0] || null;
-  } finally {
-    client.release();
+    if (error) {
+      if (error.code === 'PGRST116') { // No rows returned
+        return null;
+      }
+      logError('Error fetching completed purchase', error);
+      throw error;
+    }
+    
+    return data;
+  } catch (err) {
+    logError('Error in getCompletedPurchase', err);
+    throw err;
   }
 }
 
@@ -500,16 +520,25 @@ export async function getCompletedPurchase(sessionId) {
  * @param {string} sessionId - Stripe checkout session ID
  * @returns {Promise<void>}
  */
-export async function markHedgeExecuted(sessionId) {
-  const client = await pool.connect();
-  
+export async function markHedgeExecuted(sessionId, userToken = null) {
   try {
-    await client.query(
-      'UPDATE completed_purchases SET hedge_executed = TRUE WHERE session_id = $1',
-      [sessionId]
-    );
-  } finally {
-    client.release();
+    // For webhooks, we might not have userToken - use service role in that case
+    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
+    if (!supabase) {
+      throw new Error('Either user token or service role key is required');
+    }
+    const { error } = await supabase
+      .from('completed_purchases')
+      .update({ hedge_executed: true })
+      .eq('session_id', sessionId);
+    
+    if (error) {
+      logError('Error marking hedge as executed', error);
+      throw error;
+    }
+  } catch (err) {
+    logError('Error in markHedgeExecuted', err);
+    throw err;
   }
 }
 
@@ -518,220 +547,531 @@ export async function markHedgeExecuted(sessionId) {
  * @param {string} userId - User identifier
  * @returns {Promise<Array>} Array of completed purchase records
  */
-export async function getUserPurchaseHistory(userId) {
-  const client = await pool.connect();
-  
+export async function getUserPurchaseHistory(userId, userToken) {
   try {
-    const result = await client.query(
-      `SELECT id, session_id, stake, payout, parlay_data, completed_at, hedge_executed, parlay_status, claimable_amount, claimed_at
-       FROM completed_purchases
-       WHERE user_id = $1
-       ORDER BY completed_at DESC`,
-      [userId]
-    );
+    if (!userToken) {
+      throw new Error('User token is required');
+    }
+    const supabase = getSupabaseClient(userToken);
+    const { data, error } = await supabase
+      .from('completed_purchases')
+      .select('id, session_id, stake, payout, parlay_data, completed_at, hedge_executed, parlay_status, claimable_amount, claimed_at')
+      .eq('user_uuid', userId)
+      .order('completed_at', { ascending: false });
     
-    return result.rows;
-  } finally {
-    client.release();
+    if (error) {
+      logError('Error fetching user purchase history', error);
+      throw error;
+    }
+    
+    return data || [];
+  } catch (err) {
+    logError('Error in getUserPurchaseHistory', err);
+    throw err;
   }
 }
 
 /**
  * Update outcome for a specific leg of a parlay
  */
-export async function updateParlayBetOutcome(purchaseId, legNumber, ticker, optionId, marketStatus, outcome, settlementPrice) {
-  const client = await pool.connect();
-  
+export async function updateParlayBetOutcome(purchaseId, legNumber, ticker, optionId, marketStatus, outcome, settlementPrice, userToken = null) {
   try {
-    await client.query(`
-      INSERT INTO parlay_bet_outcomes 
-      (purchase_id, leg_number, ticker, option_id, market_status, outcome, settlement_price, checked_at, settled_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, $8)
-      ON CONFLICT (purchase_id, leg_number) 
-      DO UPDATE SET
-        market_status = $5,
-        outcome = $6,
-        settlement_price = $7,
-        checked_at = CURRENT_TIMESTAMP,
-        settled_at = CASE WHEN $5 = 'settled' AND settled_at IS NULL THEN CURRENT_TIMESTAMP ELSE settled_at END
-    `, [purchaseId, legNumber, ticker, optionId, marketStatus, outcome, settlementPrice, 
-        marketStatus === 'settled' ? new Date() : null]);
-  } finally {
-    client.release();
+    // For background jobs, we might not have userToken - use service role in that case
+    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
+    if (!supabase) {
+      throw new Error('Either user token or service role key is required');
+    }
+    const updateData = {
+      purchase_id: purchaseId,
+      leg_number: legNumber,
+      ticker: ticker,
+      option_id: optionId,
+      market_status: marketStatus,
+      outcome: outcome,
+      settlement_price: settlementPrice,
+      checked_at: new Date().toISOString()
+    };
+    
+    if (marketStatus === 'settled') {
+      updateData.settled_at = new Date().toISOString();
+    }
+    
+    const { error } = await supabase
+      .from('parlay_bet_outcomes')
+      .upsert(updateData, {
+        onConflict: 'purchase_id,leg_number',
+        ignoreDuplicates: false
+      });
+    
+    if (error) {
+      logError('Error updating parlay bet outcome', error);
+      throw error;
+    }
+  } catch (err) {
+    logError('Error in updateParlayBetOutcome', err);
+    throw err;
   }
 }
 
 /**
  * Update overall parlay status
  */
-export async function updateParlayStatus(sessionId, status, claimableAmount) {
-  const client = await pool.connect();
-  
+export async function updateParlayStatus(sessionId, status, claimableAmount, userToken = null) {
   try {
-    await client.query(`
-      UPDATE completed_purchases 
-      SET parlay_status = $1, 
-          claimable_amount = $2,
-          last_status_check = CURRENT_TIMESTAMP
-      WHERE session_id = $3
-    `, [status, claimableAmount, sessionId]);
-  } finally {
-    client.release();
+    // For background jobs, we might not have userToken - use service role in that case
+    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
+    if (!supabase) {
+      throw new Error('Either user token or service role key is required');
+    }
+    const { error } = await supabase
+      .from('completed_purchases')
+      .update({
+        parlay_status: status,
+        claimable_amount: claimableAmount,
+        last_status_check: new Date().toISOString()
+      })
+      .eq('session_id', sessionId);
+    
+    if (error) {
+      logError('Error updating parlay status', error);
+      throw error;
+    }
+  } catch (err) {
+    logError('Error in updateParlayStatus', err);
+    throw err;
   }
 }
 
 /**
  * Get active parlays (not fully settled)
+ * Note: This is a background job function, uses service role
  */
 export async function getActiveParlays() {
-  const client = await pool.connect();
-  
   try {
-    const result = await client.query(`
-      SELECT * FROM completed_purchases
-      WHERE parlay_status IN ('pending', 'won')
-      ORDER BY completed_at DESC
-    `);
-    return result.rows;
-  } finally {
-    client.release();
+    if (!serviceRoleClient) {
+      throw new Error('Service role client is required for getActiveParlays');
+    }
+    const { data, error } = await serviceRoleClient
+      .from('completed_purchases')
+      .select('*')
+      .in('parlay_status', ['pending', 'won'])
+      .order('completed_at', { ascending: false });
+    
+    if (error) {
+      logError('Error fetching active parlays', error);
+      throw error;
+    }
+    
+    return data || [];
+  } catch (err) {
+    logError('Error in getActiveParlays', err);
+    throw err;
   }
 }
 
 /**
  * Mark parlay as claimed
  */
-export async function claimParlayWinnings(sessionId) {
-  const client = await pool.connect();
-  
+export async function claimParlayWinnings(sessionId, userToken) {
   try {
-    await client.query(`
-      UPDATE completed_purchases 
-      SET claimed_at = CURRENT_TIMESTAMP
-      WHERE session_id = $1 AND parlay_status = 'won' AND claimed_at IS NULL
-    `, [sessionId]);
-  } finally {
-    client.release();
+    if (!userToken) {
+      throw new Error('User token is required');
+    }
+    const supabase = getSupabaseClient(userToken);
+    const { error } = await supabase
+      .from('completed_purchases')
+      .update({ claimed_at: new Date().toISOString() })
+      .eq('session_id', sessionId)
+      .eq('parlay_status', 'won')
+      .is('claimed_at', null);
+    
+    if (error) {
+      logError('Error claiming parlay winnings', error);
+      throw error;
+    }
+  } catch (err) {
+    logError('Error in claimParlayWinnings', err);
+    throw err;
   }
 }
 
 /**
  * Get leg outcomes for a parlay
  */
-export async function getParlayBetOutcomes(purchaseId) {
-  const client = await pool.connect();
-  
+export async function getParlayBetOutcomes(purchaseId, userToken = null) {
   try {
-    const result = await client.query(`
-      SELECT * FROM parlay_bet_outcomes
-      WHERE purchase_id = $1
-      ORDER BY leg_number ASC
-    `, [purchaseId]);
-    return result.rows;
-  } finally {
-    client.release();
+    // For background jobs, we might not have userToken - use service role in that case
+    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
+    if (!supabase) {
+      throw new Error('Either user token or service role key is required');
+    }
+    const { data, error } = await supabase
+      .from('parlay_bet_outcomes')
+      .select('*')
+      .eq('purchase_id', purchaseId)
+      .order('leg_number', { ascending: true });
+    
+    if (error) {
+      logError('Error fetching parlay bet outcomes', error);
+      throw error;
+    }
+    
+    return data || [];
+  } catch (err) {
+    logError('Error in getParlayBetOutcomes', err);
+    throw err;
   }
 }
 
 /**
  * Get or create user wallet
  */
-export async function getUserWallet(userId) {
-  const client = await pool.connect();
-  
+export async function getUserWallet(userId, userToken = null) {
   try {
-    const result = await client.query(`
-      INSERT INTO user_wallet (user_id, balance)
-      VALUES ($1, 0)
-      ON CONFLICT (user_id) DO NOTHING
-      RETURNING *
-    `, [userId]);
-    
-    if (result.rows.length === 0) {
-      const existing = await client.query(
-        'SELECT * FROM user_wallet WHERE user_id = $1',
-        [userId]
-      );
-      return existing.rows[0] || { user_id: userId, balance: 0 };
+    // For webhooks/payment redirects, we might not have userToken - use service role in that case
+    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
+    if (!supabase) {
+      throw new Error('Either user token or service role key is required');
     }
     
-    return result.rows[0];
-  } finally {
-    client.release();
+    // Try to get existing wallet
+    const { data: existingWallet, error: selectError } = await supabase
+      .from('user_wallet')
+      .select('*')
+      .eq('user_uuid', userId)
+      .single();
+    
+    if (existingWallet) {
+      return existingWallet;
+    }
+    
+    // Create wallet if it doesn't exist
+    // Note: If using service role, RLS policies are bypassed
+    // If using user token, RLS policy must allow INSERT
+    const { data: newWallet, error: insertError } = await supabase
+      .from('user_wallet')
+      .insert({
+        user_uuid: userId,
+        user_id: userId, // Keep for backward compatibility
+        balance: 0
+      })
+      .select()
+      .single();
+    
+    if (insertError) {
+      // If it's a unique constraint error, try to fetch again
+      if (insertError.code === '23505') {
+        const { data: wallet } = await supabase
+          .from('user_wallet')
+          .select('*')
+          .eq('user_uuid', userId)
+          .single();
+        return wallet || { user_uuid: userId, user_id: userId, balance: 0 };
+      }
+      logError('Error creating user wallet', insertError);
+      throw insertError;
+    }
+    
+    return newWallet || { user_uuid: userId, user_id: userId, balance: 0 };
+  } catch (err) {
+    logError('Error in getUserWallet', err);
+    throw err;
   }
 }
 
 /**
  * Add balance to user wallet
  */
-export async function addUserBalance(userId, amount) {
-  const client = await pool.connect();
-  
+export async function addUserBalance(userId, amount, userToken = null) {
   try {
-    await client.query(`
-      INSERT INTO user_wallet (user_id, balance)
-      VALUES ($1, $2)
-      ON CONFLICT (user_id) 
-      DO UPDATE SET balance = user_wallet.balance + $2, updated_at = CURRENT_TIMESTAMP
-    `, [userId, amount]);
-  } finally {
-    client.release();
+    // For webhooks/payment redirects, we might not have userToken - use service role in that case
+    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
+    if (!supabase) {
+      throw new Error('Either user token or service role key is required');
+    }
+    
+    // First ensure wallet exists
+    await getUserWallet(userId, userToken);
+    
+    // Use RPC function or raw SQL for atomic update
+    // Since Supabase doesn't have a direct way to do UPDATE ... SET balance = balance + amount
+    // We'll fetch, update, and save
+    const { data: wallet, error: fetchError } = await supabase
+      .from('user_wallet')
+      .select('balance')
+      .eq('user_uuid', userId)
+      .single();
+    
+    if (fetchError) {
+      logError('Error fetching wallet for balance update', fetchError);
+      throw fetchError;
+    }
+    
+    const newBalance = parseFloat(wallet.balance || 0) + parseFloat(amount);
+    
+    const { error: updateError } = await supabase
+      .from('user_wallet')
+      .update({
+        balance: newBalance,
+        updated_at: new Date().toISOString()
+      })
+      .eq('user_uuid', userId);
+    
+    if (updateError) {
+      logError('Error updating user balance', updateError);
+      throw updateError;
+    }
+  } catch (err) {
+    logError('Error in addUserBalance', err);
+    throw err;
+  }
+}
+
+/**
+ * Get platform liquidity pool balance
+ * Note: This is an admin function, uses service role
+ */
+export async function getLiquidityPoolBalance() {
+  try {
+    if (!serviceRoleClient) {
+      throw new Error('Service role client is required for getLiquidityPoolBalance');
+    }
+    const { data, error } = await serviceRoleClient
+      .from('platform_liquidity_pool')
+      .select('balance')
+      .eq('id', 1)
+      .single();
+    
+    if (error) {
+      if (error.code === 'PGRST116') {
+      // Initialize if doesn't exist
+        const { data: newPool, error: insertError } = await serviceRoleClient
+          .from('platform_liquidity_pool')
+          .insert({
+            id: 1,
+            balance: 0.00
+          })
+          .select()
+          .single();
+        
+        if (insertError) {
+          logError('Error initializing liquidity pool', insertError);
+          throw insertError;
+        }
+        
+      return { balance: 0 };
+      }
+      logError('Error fetching liquidity pool balance', error);
+      throw error;
+    }
+    
+    return data || { balance: 0 };
+  } catch (err) {
+    logError('Error in getLiquidityPoolBalance', err);
+    throw err;
+  }
+}
+
+/**
+ * Update platform liquidity pool balance
+ * @param {number} amount - Amount to add (positive) or subtract (negative)
+ * Note: This is an admin function, uses service role
+ */
+export async function updateLiquidityPoolBalance(amount) {
+  try {
+    if (!serviceRoleClient) {
+      throw new Error('Service role client is required for updateLiquidityPoolBalance');
+    }
+    // Fetch current balance
+    const { data: pool, error: fetchError } = await serviceRoleClient
+      .from('platform_liquidity_pool')
+      .select('balance')
+      .eq('id', 1)
+      .single();
+    
+    if (fetchError && fetchError.code !== 'PGRST116') {
+      logError('Error fetching liquidity pool for update', fetchError);
+      throw fetchError;
+    }
+    
+    const currentBalance = pool ? parseFloat(pool.balance || 0) : 0;
+    const newBalance = currentBalance + parseFloat(amount);
+    
+    const { error: upsertError } = await serviceRoleClient
+      .from('platform_liquidity_pool')
+      .upsert({
+        id: 1,
+        balance: newBalance,
+        updated_at: new Date().toISOString()
+      }, {
+        onConflict: 'id'
+      });
+    
+    if (upsertError) {
+      logError('Error updating liquidity pool balance', upsertError);
+      throw upsertError;
+    }
+  } catch (err) {
+    logError('Error in updateLiquidityPoolBalance', err);
+    throw err;
   }
 }
 
 /**
  * Create withdrawal request
  */
-export async function createWithdrawalRequest(userId, amount, paymentMethod, stripePayoutId = null) {
-  const client = await pool.connect();
-  
+export async function createWithdrawalRequest(userId, amount, paymentMethod, stripePayoutId = null, stripeTransferId = null, userToken) {
   try {
-    const result = await client.query(`
-      INSERT INTO withdrawal_requests (user_id, amount, payment_method, stripe_payout_id, status)
-      VALUES ($1, $2, $3, $4, 'pending')
-      RETURNING *
-    `, [userId, amount, paymentMethod, stripePayoutId]);
+    if (!userToken) {
+      throw new Error('User token is required');
+    }
+    const supabase = getSupabaseClient(userToken);
+    const { data, error } = await supabase
+      .from('withdrawal_requests')
+      .insert({
+        user_uuid: userId,
+        user_id: userId, // Keep for backward compatibility
+        amount: amount,
+        payment_method: paymentMethod,
+        stripe_payout_id: stripePayoutId,
+        stripe_transfer_id: stripeTransferId,
+        status: 'pending'
+      })
+      .select()
+      .single();
     
-    return result.rows[0];
-  } finally {
-    client.release();
+    if (error) {
+      logError('Error creating withdrawal request', error);
+      throw error;
+    }
+    
+    return data;
+  } catch (err) {
+    logError('Error in createWithdrawalRequest', err);
+    throw err;
   }
 }
 
 /**
  * Update withdrawal request status
  */
-export async function updateWithdrawalStatus(withdrawalId, status, stripePayoutId = null) {
-  const client = await pool.connect();
-  
+export async function updateWithdrawalStatus(withdrawalId, status, stripePayoutId = null, userToken = null) {
   try {
-    await client.query(`
-      UPDATE withdrawal_requests 
-      SET status = $1, stripe_payout_id = COALESCE($2, stripe_payout_id), completed_at = CASE WHEN $1 = 'completed' THEN CURRENT_TIMESTAMP ELSE completed_at END
-      WHERE id = $3
-    `, [status, stripePayoutId, withdrawalId]);
-  } finally {
-    client.release();
+    // For admin operations, we might not have userToken - use service role in that case
+    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
+    if (!supabase) {
+      throw new Error('Either user token or service role key is required');
+    }
+    const updateData = {
+      status: status
+    };
+    
+    if (stripePayoutId) {
+      updateData.stripe_payout_id = stripePayoutId;
+    }
+    
+    if (status === 'completed') {
+      updateData.completed_at = new Date().toISOString();
+    }
+    
+    const { error } = await supabase
+      .from('withdrawal_requests')
+      .update(updateData)
+      .eq('id', withdrawalId);
+    
+    if (error) {
+      logError('Error updating withdrawal status', error);
+      throw error;
+    }
+  } catch (err) {
+    logError('Error in updateWithdrawalStatus', err);
+    throw err;
   }
 }
 
 /**
  * Get withdrawal requests for a user
  */
-export async function getWithdrawalRequests(userId) {
-  const client = await pool.connect();
-  
+export async function getWithdrawalRequests(userId, userToken) {
   try {
-    const result = await client.query(`
-      SELECT * FROM withdrawal_requests
-      WHERE user_id = $1
-      ORDER BY created_at DESC
-    `, [userId]);
-    return result.rows;
-  } finally {
-    client.release();
+    if (!userToken) {
+      throw new Error('User token is required');
+    }
+    const supabase = getSupabaseClient(userToken);
+    const { data, error } = await supabase
+      .from('withdrawal_requests')
+      .select('*')
+      .eq('user_uuid', userId)
+      .order('created_at', { ascending: false });
+    
+    if (error) {
+      logError('Error fetching withdrawal requests', error);
+      throw error;
+    }
+    
+    return data || [];
+  } catch (err) {
+    logError('Error in getWithdrawalRequests', err);
+    throw err;
   }
 }
 
-export default pool;
+/**
+ * Save Stripe Connect account ID for user
+ */
+export async function saveStripeAccount(userId, stripeAccountId, status = 'pending', userToken) {
+  try {
+    if (!userToken) {
+      throw new Error('User token is required');
+    }
+    const supabase = getSupabaseClient(userToken);
+    const { error } = await supabase
+      .from('users')
+      .update({
+        stripe_account_id: stripeAccountId,
+        stripe_account_status: status
+      })
+      .eq('id', userId);
+    
+    if (error) {
+      logError('Error saving Stripe account', error);
+      throw error;
+    }
+  } catch (err) {
+    logError('Error in saveStripeAccount', err);
+    throw err;
+  }
+}
 
+/**
+ * Get user's Stripe Connect account
+ */
+export async function getUserStripeAccount(userId, userToken) {
+  try {
+    if (!userToken) {
+      throw new Error('User token is required');
+    }
+    const supabase = getSupabaseClient(userToken);
+    const { data, error } = await supabase
+      .from('users')
+      .select('stripe_account_id, stripe_account_status')
+      .eq('id', userId)
+      .single();
+    
+    if (error) {
+      if (error.code === 'PGRST116') {
+        return null;
+      }
+      logError('Error fetching Stripe account', error);
+      throw error;
+    }
+    
+    return data || null;
+  } catch (err) {
+    logError('Error in getUserStripeAccount', err);
+    throw err;
+  }
+}
+
+// Export service role client for direct access if needed (admin operations only)
+export default serviceRoleClient;

@@ -71,13 +71,39 @@ export async function getMarketById(marketId) {
         
         // If not found, the URL might be an event ticker
         // Find all markets that belong to this event
-        const eventMarkets = data.markets.filter(m => 
-          m.event_ticker === upperTicker || m.ticker.startsWith(upperTicker + '-')
-        );
+        // For event tickers like "KXPRESPERSON-28", markets are like "KXPRESPERSON-28-JVAN"
+        const eventMarkets = data.markets.filter(m => {
+          // Match by event_ticker field if it exists
+          if (m.event_ticker && m.event_ticker.toUpperCase() === upperTicker) {
+            return true;
+          }
+          // Match by ticker prefix (e.g., "KXPRESPERSON-28-JVAN" starts with "KXPRESPERSON-28-")
+          if (m.ticker && m.ticker.toUpperCase().startsWith(upperTicker + '-')) {
+            return true;
+          }
+          return false;
+        });
         
         if (eventMarkets.length > 0) {
-          // Return all markets for this event (e.g., both SEA and LA options)
+          console.log(`[kalshiClient] Found ${eventMarkets.length} markets for event ${upperTicker}`);
+          // Return all markets for this event
           return { markets: eventMarkets };
+        }
+        
+        // If still no match and the ticker looks like an event ticker (contains numbers after series)
+        // Try to match by series and event number pattern
+        // For example, "KXPRESPERSON-28" should match markets like "KXPRESPERSON-28-*"
+        const tickerParts = upperTicker.split('-');
+        if (tickerParts.length >= 2) {
+          const eventPattern = tickerParts.slice(0, 2).join('-'); // e.g., "KXPRESPERSON-28"
+          const patternMarkets = data.markets.filter(m => 
+            m.ticker && m.ticker.toUpperCase().startsWith(eventPattern + '-')
+          );
+          
+          if (patternMarkets.length > 0) {
+            console.log(`[kalshiClient] Found ${patternMarkets.length} markets matching pattern ${eventPattern}-*`);
+            return { markets: patternMarkets };
+          }
         }
       }
     } catch (err) {
@@ -87,6 +113,22 @@ export async function getMarketById(marketId) {
   
   // Fallback: return empty if not found
   return { markets: [] };
+}
+
+/**
+ * Fetch full details for a specific market ticker.
+ * Uses the /markets/{ticker} endpoint to get complete market information.
+ * This includes fields like subtitle, yes_sub_title, no_sub_title which contain full option names.
+ */
+export async function getMarketDetails(ticker) {
+  const upperTicker = ticker.toUpperCase();
+  try {
+    const data = await kalshiRequest(`/markets/${upperTicker}`);
+    return data.market || null;
+  } catch (err) {
+    console.error(`Failed to fetch market details for ${upperTicker}:`, err);
+    return null;
+  }
 }
 
 /**
