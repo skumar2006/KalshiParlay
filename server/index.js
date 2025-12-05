@@ -202,12 +202,14 @@ app.get('/', (req, res) => {
   res.send(html);
 });
 
-// Public config endpoint - serves Supabase credentials for frontend
+// Public config endpoint - serves Supabase credentials and backend URL for frontend
 // The anon key is safe to expose publicly (that's its purpose)
-app.get('/api/config', (_req, res) => {
+app.get('/api/config', (req, res) => {
   res.json({
     supabaseUrl: ENV.SUPABASE_URL || null,
-    supabaseAnonKey: ENV.SUPABASE_ANON_KEY || null
+    supabaseAnonKey: ENV.SUPABASE_ANON_KEY || null,
+    backendUrl: ENV.BACKEND_BASE_URL || `${req.protocol}://${req.get('host')}`,
+    environment: ENV.ENVIRONMENT
   });
 });
 
@@ -621,10 +623,13 @@ app.post('/api/webhook', express.raw({type: 'application/json'}), async (req, re
 // JSON parsing for all other routes
 app.use(express.json());
 
-// Initialize database on startup
+// Initialize database on startup (non-blocking)
+// Don't crash if Supabase is temporarily unavailable - the app can still serve other endpoints
 initializeDatabase().catch(err => {
   logError("Failed to initialize database", err);
-  process.exit(1);
+  logWarn("Server will continue running, but database operations may fail until Supabase is available");
+  logWarn("Please check your SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables");
+  // Don't exit - allow server to start and retry later
 });
 
 /**

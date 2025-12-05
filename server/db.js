@@ -61,6 +61,15 @@ export async function initializeDatabase() {
   try {
     logInfo('Verifying Supabase connection...');
     
+    // Check if Supabase credentials are configured
+    if (!ENV.SUPABASE_URL) {
+      throw new Error('SUPABASE_URL is not set in environment variables');
+    }
+    
+    if (!ENV.SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error('SUPABASE_SERVICE_ROLE_KEY is not set in environment variables');
+    }
+    
     // Use service role client for health checks only
     const client = serviceRoleClient;
     if (!client) {
@@ -76,12 +85,18 @@ export async function initializeDatabase() {
     
     if (error && error.code !== 'PGRST116') { // PGRST116 = table doesn't exist
       logError('Supabase connection error', error);
+      logError('Supabase URL:', ENV.SUPABASE_URL);
+      logError('Error details:', JSON.stringify(error, null, 2));
       throw error;
     }
     
     logInfo('Supabase connection verified successfully');
     } catch (err) {
     logError('Error verifying Supabase connection', err);
+    logError('Please verify:');
+    logError('  - SUPABASE_URL is correct (should be https://your-project.supabase.co)');
+    logError('  - SUPABASE_SERVICE_ROLE_KEY is set correctly');
+    logError('  - Network connectivity to Supabase (check firewall/VPN)');
     throw err;
   }
 }

@@ -22,7 +22,8 @@
     "https://kalshi.com/*",
     "https://www.kalshi.com/*",
     "https://demo.kalshi.co/*",
-    "http://localhost:4000/*"
+    "http://localhost:4000/*",
+    "https://*.railway.app/*"
   ],
   "content_scripts": [
     {

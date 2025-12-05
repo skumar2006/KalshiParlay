@@ -5,7 +5,7 @@
 
 // Import constants (Note: Chrome extensions don't support ES modules in content scripts)
 // Using inline constants for now
-const BACKEND_BASE_URL = "http://localhost:4000";
+let BACKEND_BASE_URL = "http://localhost:4000"; // Will be updated from config
 const MIN_BETS_FOR_PARLAY = 2;
 
 // Supabase configuration - loaded from backend config endpoint
@@ -13,16 +13,57 @@ let SUPABASE_URL = null;
 let SUPABASE_ANON_KEY = null;
 let supabase = null;
 
-// Load Supabase config from backend
-async function loadSupabaseConfig() {
+// Load backend URL and Supabase config from backend
+async function loadBackendConfig() {
   try {
+    // Try to get backend URL from storage first (user might have set it)
+    const stored = await chrome.storage.sync.get('backendUrl');
+    if (stored.backendUrl) {
+      BACKEND_BASE_URL = stored.backendUrl;
+      console.log(`[Config] Using stored backend URL: ${BACKEND_BASE_URL}`);
+    }
+    
+    // Fetch config from backend (will use stored URL or fallback to localhost)
     const res = await fetch(`${BACKEND_BASE_URL}/api/config`);
     if (!res.ok) {
-      throw new Error(`Failed to load config: ${res.status}`);
+      // If localhost fails, try common production URLs
+      const productionUrls = [
+        'https://kalshi-parlay-production.up.railway.app',
+        'https://kalshi-parlay.railway.app',
+        // Add your actual Railway URL here
+      ];
+      
+      for (const url of productionUrls) {
+        try {
+          const prodRes = await fetch(`${url}/api/config`);
+          if (prodRes.ok) {
+            BACKEND_BASE_URL = url;
+            await chrome.storage.sync.set({ backendUrl: url });
+            console.log(`[Config] Found production backend: ${BACKEND_BASE_URL}`);
+            res = prodRes;
+            break;
+          }
+        } catch (e) {
+          // Try next URL
+          continue;
+        }
+      }
+      
+      if (!res.ok) {
+        throw new Error(`Failed to load config: ${res.status}`);
+      }
     }
-    const config = await res.json();
-    SUPABASE_URL = config.supabaseUrl;
-    SUPABASE_ANON_KEY = config.supabaseAnonKey;
+    
+    const backendConfig = await res.json();
+    SUPABASE_URL = backendConfig.supabaseUrl;
+    SUPABASE_ANON_KEY = backendConfig.supabaseAnonKey;
+    
+    // Update backend URL from config if provided
+    if (backendConfig.backendUrl && backendConfig.backendUrl !== BACKEND_BASE_URL) {
+      BACKEND_BASE_URL = backendConfig.backendUrl;
+      await chrome.storage.sync.set({ backendUrl: backendConfig.backendUrl });
+      console.log(`[Config] Updated backend URL from config: ${BACKEND_BASE_URL}`);
+    }
     
     if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
       console.warn('Supabase credentials not configured in backend. Please set SUPABASE_URL and SUPABASE_ANON_KEY in your .env file');
@@ -37,10 +78,15 @@ async function loadSupabaseConfig() {
   }
 }
 
+// Alias for backward compatibility
+async function loadSupabaseConfig() {
+  return loadBackendConfig();
+}
+
 // Initialize Supabase after scripts load
 async function initSupabase() {
   // First, load config from backend
-  const configLoaded = await loadSupabaseConfig();
+  const configLoaded = await loadBackendConfig();
   if (!configLoaded) {
     console.error('Failed to load Supabase config from backend');
     return false;
