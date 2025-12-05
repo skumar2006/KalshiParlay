@@ -521,7 +521,7 @@ export async function executeHedgingStrategy(hedgeBets, metadata = {}) {
     console.log(`   2. Ensure ${USE_DEMO ? 'KALSHI_DEMO_PRIVATE_KEY' : 'KALSHI_PRIVATE_KEY'} is set in .env`);
     console.log(`   3. Ensure ${USE_DEMO ? 'KALSHI_DEMO_API_KEY' : 'KALSHI_API_KEY'} is set in .env`);
     if (USE_DEMO) {
-      console.log(`   4. Test in demo environment first`);
+    console.log(`   4. Test in demo environment first`);
     }
   } else {
     console.log(`\n🚀 REAL ORDERS MODE - Orders placed on Kalshi ${USE_DEMO ? 'demo' : 'production'}`);
