@@ -123,6 +123,10 @@ export const ENV = {
   // Feature flags
   KALSHI_DRY_RUN: getEnvBool('KALSHI_DRY_RUN', true),
   VERBOSE_HEDGING: getEnvBool('VERBOSE_HEDGING', false),
+  
+  // Hedging parameters
+  HEDGE_BETA: parseFloat(getEnv('HEDGE_BETA', '0.6')), // Fraction of margin to spend (default 0.6 = 60%)
+  HEDGE_ALPHA_MAX: parseFloat(getEnv('HEDGE_ALPHA_MAX', '0.4')), // Max hedge fraction (default 0.4 = 40%)
 };
 
 // Set Kalshi API base URL based on environment if not explicitly set

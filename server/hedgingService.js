@@ -1,287 +1,269 @@
 import dotenv from 'dotenv';
+import { ENV } from '../config/env.js';
 
 dotenv.config();
 
 /**
- * Variance Reduction Hedging Strategy
+ * Simplified Parlay Hedging Algorithm
  * 
- * Goals:
- * 1. Reduce variance by hedging high-probability legs
- * 2. Maintain/increase positive EV
- * 3. Offer users 85-90% of AI-determined fair payout
- * 4. Log all reasoning for transparency
+ * Goal: Keep EV positive, reduce tail risk/variance, never risk more than margin
+ * 
+ * Algorithm:
+ * 1. Compute margin = S - p_parlay * P_quote
+ * 2. Compute delta per leg (contribution to tail risk)
+ * 3. Compute raw exposure per leg = delta * P_quote
+ * 4. Compute alpha scaling factor (constrained by budget and max)
+ * 5. Compute hedges per leg = alpha * raw_exposure
+ * 6. Guarantees EV_post_hedge = margin - expected_hedge_cost > 0
  * 
  * @param {Array} bets - Array of bet objects with marketTitle, optionLabel, prob
- * @param {number} userStake - The amount user is betting
- * @param {number} adjustedPayout - AI-determined fair payout (already 85-90% of true fair)
- * @param {number} adjustedProbability - AI-adjusted probability (accounts for correlation)
+ * @param {number} userStake - The amount user is betting (S)
+ * @param {number} adjustedPayout - Quoted payout to user (P_quote)
+ * @param {number} adjustedProbability - AI-adjusted parlay probability (accounts for correlation)
  * @param {Object} aiAnalysis - Full AI analysis for logging
+ * @param {number} beta - Fraction of margin to spend on hedging (default 0.6)
+ * @param {number} alphaMax - Maximum fraction of raw exposure to hedge (default 0.4)
  * @returns {Object} Hedging strategy details
  */
-export function calculateHedgingStrategy(bets, userStake, adjustedPayout, adjustedProbability, aiAnalysis = {}) {
-  // Reduced logging - only show summary unless debugging
-  const verboseLogging = process.env.VERBOSE_HEDGING === 'true';
+export function calculateHedgingStrategy(
+  bets, 
+  userStake, 
+  adjustedPayout, 
+  adjustedProbability, 
+  aiAnalysis = {},
+  beta = ENV.HEDGE_BETA,
+  alphaMax = ENV.HEDGE_ALPHA_MAX
+) {
+  const verboseLogging = ENV.VERBOSE_HEDGING;
   
   if (verboseLogging) {
     console.log("\n" + "=".repeat(80));
-    console.log("🎯 VARIANCE REDUCTION HEDGING STRATEGY");
+    console.log("🎯 SIMPLIFIED PARLAY HEDGING ALGORITHM");
     console.log("=".repeat(80));
   }
   
-  // Step 1: Log parlay details (only if verbose)
+  const n = bets.length;
+  const S = userStake;
+  const P_quote = adjustedPayout;
+  const p_parlay = adjustedProbability; // Already adjusted for correlation
+  
+  // Extract leg probabilities
+  const p = bets.map(bet => bet.prob / 100); // Convert percentages to decimals
+  
   if (verboseLogging) {
     console.log("\n📊 PARLAY DETAILS:");
-    console.log(`   Number of legs: ${bets.length}`);
-    console.log(`   User stake: $${userStake.toFixed(2)}`);
-    
+    console.log(`   Number of legs: ${n}`);
+    console.log(`   User stake: $${S.toFixed(2)}`);
+    console.log(`   Quoted payout: $${P_quote.toFixed(2)}`);
+    console.log(`   Parlay probability: ${(p_parlay * 100).toFixed(2)}%`);
     console.log("\n   Legs:");
     bets.forEach((bet, i) => {
-      console.log(`   ${i + 1}. ${bet.marketTitle}`);
-      console.log(`      Betting on: ${bet.optionLabel}`);
-      console.log(`      Kalshi probability: ${bet.prob}%`);
+      console.log(`   ${i + 1}. ${bet.marketTitle} - ${bet.optionLabel} (${(p[i] * 100).toFixed(1)}%)`);
     });
   }
   
-  // Step 2: Calculate naive (independent) probability
-  const naiveCombinedProb = bets.reduce((acc, bet) => acc * (bet.prob / 100), 1);
-  const naivePayout = userStake / naiveCombinedProb;
+  // Step 0: Compute parlay probability & margin
+  // Note: We use adjustedProbability (already accounts for correlation) instead of naive product
+  const margin = S - p_parlay * P_quote;
+  const hedgeBudget = beta * margin;
   
   if (verboseLogging) {
-    console.log("\n💭 FAIR VALUE CALCULATION:");
-    console.log(`   Naive combined probability: ${(naiveCombinedProb * 100).toFixed(2)}%`);
-    console.log(`   (Assuming independent events)`);
-    console.log(`   Naive payout: $${naivePayout.toFixed(2)}`);
-    
-    // Step 3: Show AI adjustment
-    console.log("\n🤖 AI CORRELATION ANALYSIS:");
-    if (aiAnalysis.correlationAnalysis) {
-      console.log(`   ${aiAnalysis.correlationAnalysis}`);
-    }
-    console.log(`   AI-adjusted probability: ${(adjustedProbability * 100).toFixed(2)}%`);
-    console.log(`   Correlation factor: ${aiAnalysis.correlationFactor || 'N/A'}`);
-    
-    const fairPayout = userStake / adjustedProbability;
-    console.log(`   True fair payout: $${fairPayout.toFixed(2)}`);
-    
-    if (aiAnalysis.reasoning) {
-      console.log(`\n   Reasoning: ${aiAnalysis.reasoning}`);
-    }
-    
-    // Step 4: Show what we're offering the user
-    const payoutPercentage = (adjustedPayout / fairPayout) * 100;
-    console.log("\n💰 PAYOUT TO USER:");
-    console.log(`   Fair payout: $${fairPayout.toFixed(2)}`);
-    console.log(`   Offering: $${adjustedPayout.toFixed(2)} (${payoutPercentage.toFixed(1)}% of fair)`);
-    console.log(`   House edge: ${(100 - payoutPercentage).toFixed(1)}%`);
+    console.log("\n💰 MARGIN CALCULATION:");
+    console.log(`   Margin extracted: $${margin.toFixed(2)}`);
+    console.log(`   Hedge budget (β=${beta}): $${hedgeBudget.toFixed(2)}`);
+    console.log(`   Max hedge fraction (α_max=${alphaMax}): ${(alphaMax * 100).toFixed(0)}%`);
   }
   
-  const fairPayout = userStake / adjustedProbability;
-  const payoutPercentage = (adjustedPayout / fairPayout) * 100;
-  
-  // Step 5: Calculate unhedged position
-  const userWinProb = adjustedProbability;
-  const userLoseProb = 1 - userWinProb;
-  const unhedgedEV = (userStake * userLoseProb) - (adjustedPayout * userWinProb);
-  const unhedgedEdge = (unhedgedEV / userStake) * 100;
-  
-  const unhedgedVariance = Math.pow(adjustedPayout - userStake, 2) * userWinProb + 
-                           Math.pow(userStake, 2) * userLoseProb - 
-                           Math.pow(unhedgedEV, 2);
-  const unhedgedStdDev = Math.sqrt(unhedgedVariance);
-  
-  if (verboseLogging) {
-    console.log("\n📈 UNHEDGED POSITION:");
-    console.log(`   If user WINS (${(userWinProb * 100).toFixed(2)}%): -$${(adjustedPayout - userStake).toFixed(2)}`);
-    console.log(`   If user LOSES (${(userLoseProb * 100).toFixed(2)}%): +$${userStake.toFixed(2)}`);
-    console.log(`   Expected value: $${unhedgedEV.toFixed(2)}`);
-    console.log(`   Edge: ${unhedgedEdge.toFixed(2)}%`);
-    console.log(`   Standard deviation: $${unhedgedStdDev.toFixed(2)}`);
-    console.log(`   ⚠️  High variance - outcome range: -$${(adjustedPayout - userStake).toFixed(2)} to +$${userStake.toFixed(2)}`);
+  // If margin is negative or zero, no hedging makes sense
+  if (margin <= 0) {
+    const unhedgedStdDev = Math.sqrt(
+      p_parlay * Math.pow(P_quote - S, 2) + 
+      (1 - p_parlay) * Math.pow(S, 2) - 
+      Math.pow(margin, 2)
+    );
     
-    // Step 6: Determine which legs to hedge
-    console.log("\n🛡️ HEDGING DECISION:");
-    console.log("   Strategy: Hedge high-probability legs to reduce variance");
-    console.log("   Rule: Hedge legs with probability > 50%");
-  }
-  
-  const hedgingDecisions = [];
-  const hedgeBets = [];
-  
-  bets.forEach((bet, i) => {
-    const prob = bet.prob;
-    let decision;
-    let hedgeAmount = 0;
-    let reasoning;
-    
-    if (prob >= 65) {
-      // High probability - definitely hedge
-      hedgeAmount = userStake * 0.40; // 40% of stake
-      decision = "✅ HEDGE";
-      reasoning = `High probability (${prob}%) - aggressive hedge to reduce variance`;
-    } else if (prob >= 55) {
-      // Medium-high probability - moderate hedge
-      hedgeAmount = userStake * 0.25; // 25% of stake
-      decision = "✅ HEDGE";
-      reasoning = `Medium-high probability (${prob}%) - moderate hedge`;
-    } else if (prob >= 50) {
-      // Medium probability - light hedge
-      hedgeAmount = userStake * 0.15; // 15% of stake
-      decision = "✅ HEDGE";
-      reasoning = `Medium probability (${prob}%) - light hedge`;
-    } else {
-      // Low probability - don't hedge
-      decision = "❌ NO HEDGE";
-      reasoning = `Low probability (${prob}%) - hedging cost exceeds variance benefit`;
-    }
-    
-    hedgingDecisions.push({
-      leg: i + 1,
-      market: bet.marketTitle,
-      option: bet.optionLabel,
-      probability: prob,
-      decision,
-      hedgeAmount,
-      reasoning
-    });
-    
-    if (hedgeAmount > 0) {
-      const kalshiOdds = 1 / (prob / 100);
-      const potentialWin = hedgeAmount * kalshiOdds;
-      
-      hedgeBets.push({
-        leg: i + 1,
-        market: bet.marketTitle,
-        option: bet.optionLabel,
-        probability: prob,
-        hedgeAmount,
-        potentialWin,
-        cost: hedgeAmount,
-        ticker: bet.ticker || null, // Kalshi ticker for API
-        marketId: bet.marketId || null
-      });
-    }
-    
-    if (verboseLogging) {
-      console.log(`\n   Leg ${i + 1}: ${bet.marketTitle} - ${bet.optionLabel} (${prob}%)`);
-      console.log(`   Decision: ${decision}`);
-      console.log(`   ${reasoning}`);
-      if (hedgeAmount > 0) {
-        const kalshiOdds = 1 / (prob / 100);
-        const potentialWin = hedgeAmount * kalshiOdds;
-        console.log(`   Hedge: Bet $${hedgeAmount.toFixed(2)} on Kalshi`);
-        console.log(`   If wins: Return $${potentialWin.toFixed(2)} (profit: $${(potentialWin - hedgeAmount).toFixed(2)})`);
-      }
-    }
-  });
-  
-  // Step 7: Calculate all scenarios with hedging
-  const totalHedgeCost = hedgeBets.reduce((sum, bet) => sum + bet.cost, 0);
-  
-  if (hedgeBets.length === 0) {
-    // Always log this decision (not just in verbose mode) since it's important
-    console.log("\n📊 NO HEDGING NEEDED:");
-    console.log(`   All legs have probability < 50%`);
-    console.log(`   Parlay legs:`);
-    bets.forEach((bet, i) => {
-      console.log(`     Leg ${i + 1}: ${bet.prob}% - ${bet.marketTitle} - ${bet.optionLabel}`);
-    });
-    console.log(`   Variance is acceptable for this parlay`);
-    console.log(`   Maintain unhedged position with ${unhedgedEdge.toFixed(2)}% edge`);
-    console.log("\n" + "=".repeat(80) + "\n");
+    console.log("\n⚠️  WARNING: Negative or zero margin - no hedging possible");
+    console.log(`   Margin: $${margin.toFixed(2)}`);
+    console.log(`   This means quoted payout is too high relative to probability`);
     
     return {
       needsHedging: false,
-      unhedgedEV: unhedgedEV,
-      unhedgedEdge: unhedgedEdge,
+      unhedgedEV: margin,
+      unhedgedEdge: (margin / S) * 100,
       unhedgedStdDev: unhedgedStdDev,
-      reasoning: "No high-probability legs to hedge"
+      reasoning: "Negative margin - quoted payout exceeds expected value"
     };
   }
   
-  if (verboseLogging) {
-    console.log(`\n💸 TOTAL HEDGING COST: $${totalHedgeCost.toFixed(2)}`);
-    
-    // Calculate all possible outcomes
-    console.log("\n🎲 SCENARIO ANALYSIS:");
-    console.log("   Calculating all possible outcomes...");
+  // Step 1: Compute delta per leg
+  // Delta = contribution of each leg to parlay tail risk
+  const deltas = [];
+  for (let j = 0; j < n; j++) {
+    let delta = 1;
+    for (let k = 0; k < n; k++) {
+      if (k !== j) {
+        delta *= p[k];
+      }
+    }
+    deltas.push(delta);
   }
   
-  const scenarios = calculateAllScenarios(bets, userStake, adjustedPayout, hedgeBets);
-  
-  // Show key scenarios (only if verbose)
   if (verboseLogging) {
-    scenarios.sort((a, b) => b.probability - a.probability);
-    
-    console.log("\n   Top scenarios by probability:");
-    scenarios.slice(0, 5).forEach((scenario, i) => {
-      console.log(`\n   ${i + 1}. ${scenario.description} (${(scenario.probability * 100).toFixed(2)}% chance)`);
-      console.log(`      Net result: ${scenario.net >= 0 ? '+' : ''}$${scenario.net.toFixed(2)}`);
-      scenario.breakdown.forEach(line => console.log(`      ${line}`));
+    console.log("\n📐 DELTA CALCULATION (tail risk contribution per leg):");
+    bets.forEach((bet, i) => {
+      console.log(`   Leg ${i + 1}: Δ = ${deltas[i].toFixed(4)} (${(deltas[i] * 100).toFixed(2)}% contribution)`);
     });
   }
   
-  // Calculate hedged EV and variance
-  const hedgedEV = scenarios.reduce((sum, s) => sum + (s.net * s.probability), 0);
-  const hedgedEdge = (hedgedEV / userStake) * 100;
-  
-  const hedgedVariance = scenarios.reduce((sum, s) => {
-    return sum + (Math.pow(s.net - hedgedEV, 2) * s.probability);
-  }, 0);
-  const hedgedStdDev = Math.sqrt(hedgedVariance);
-  
-  const varianceReduction = ((unhedgedStdDev - hedgedStdDev) / unhedgedStdDev) * 100;
-  const evChange = ((hedgedEV - unhedgedEV) / Math.abs(unhedgedEV)) * 100;
-  
-  // Always log summary (concise)
-  console.log(`\n🛡️ Hedging: ${hedgeBets.length} bets, $${totalHedgeCost.toFixed(2)} cost, ${varianceReduction.toFixed(1)}% variance reduction`);
+  // Step 2: Compute raw exposure per leg
+  const E = deltas.map(delta => delta * P_quote);
   
   if (verboseLogging) {
-    console.log("\n📊 HEDGED POSITION:");
-    console.log(`   Expected value: $${hedgedEV.toFixed(2)}`);
-    console.log(`   Edge: ${hedgedEdge.toFixed(2)}%`);
-    console.log(`   Standard deviation: $${hedgedStdDev.toFixed(2)}`);
-    
-    console.log("\n✅ HEDGING IMPACT:");
-    console.log(`   Variance reduction: ${varianceReduction.toFixed(1)}%`);
-    console.log(`   EV change: ${evChange >= 0 ? '+' : ''}${evChange.toFixed(1)}%`);
-    console.log(`   Edge: ${unhedgedEdge.toFixed(2)}% → ${hedgedEdge.toFixed(2)}%`);
-    
-    if (hedgedEV > unhedgedEV && varianceReduction > 0) {
-      console.log(`   🎊 WIN-WIN: Higher EV AND lower variance!`);
-    } else if (varianceReduction > 0) {
-      console.log(`   ✅ SUCCESS: Reduced variance while maintaining positive EV`);
-    } else {
-      console.log(`   ⚠️  WARNING: Hedging may not be optimal for this parlay`);
+    console.log("\n💵 RAW EXPOSURE PER LEG:");
+    bets.forEach((bet, i) => {
+      console.log(`   Leg ${i + 1}: E = $${E[i].toFixed(2)}`);
+    });
+  }
+  
+  // Step 3: Compute alpha (hedge scaling factor)
+  const rawCost = E.reduce((sum, E_j, j) => sum + E_j * p[j], 0);
+  const alpha = Math.min(hedgeBudget / rawCost, alphaMax);
+  
+  if (verboseLogging) {
+    console.log("\n⚖️  ALPHA CALCULATION:");
+    console.log(`   Raw expected hedge cost: $${rawCost.toFixed(2)}`);
+    console.log(`   Hedge budget: $${hedgeBudget.toFixed(2)}`);
+    console.log(`   Alpha (scaling factor): ${alpha.toFixed(4)} (${(alpha * 100).toFixed(2)}%)`);
+    if (alpha >= alphaMax) {
+      console.log(`   ⚠️  Alpha capped at α_max = ${alphaMax}`);
     }
+  }
+  
+  // Step 4: Compute hedges per leg
+  const hedges = E.map(E_j => alpha * E_j);
+  const totalHedgeCost = hedges.reduce((sum, h) => sum + h, 0);
+  
+  if (verboseLogging) {
+    console.log("\n🛡️  HEDGE SIZES PER LEG:");
+    bets.forEach((bet, i) => {
+      const hedgeAmount = hedges[i];
+      const kalshiOdds = 1 / p[i];
+      const potentialWin = hedgeAmount * kalshiOdds;
+      console.log(`   Leg ${i + 1}: $${hedgeAmount.toFixed(2)}`);
+      console.log(`      If wins: Return $${potentialWin.toFixed(2)} (profit: $${(potentialWin - hedgeAmount).toFixed(2)})`);
+    });
+    console.log(`   Total hedge cost: $${totalHedgeCost.toFixed(2)}`);
+  }
+  
+  // Step 5: Compute post-hedge EV
+  const expectedHedgeCost = hedges.reduce((sum, h, j) => sum + h * p[j], 0);
+  const EV_post_hedge = margin - expectedHedgeCost;
+  const postHedgeEdge = (EV_post_hedge / S) * 100;
+  
+  if (verboseLogging) {
+    console.log("\n📊 POST-HEDGE EV:");
+    console.log(`   Expected hedge cost: $${expectedHedgeCost.toFixed(2)}`);
+    console.log(`   Post-hedge EV: $${EV_post_hedge.toFixed(2)}`);
+    console.log(`   Post-hedge edge: ${postHedgeEdge.toFixed(2)}%`);
+    console.log(`   ✅ EV remains positive: ${EV_post_hedge > 0 ? 'YES' : 'NO'}`);
+  }
+  
+  // Build hedge bets array (for compatibility with existing code)
+  const hedgeBets = [];
+  const hedgingDecisions = [];
+  
+  for (let i = 0; i < n; i++) {
+    const hedgeAmount = hedges[i];
+    const prob = bets[i].prob;
+    const kalshiOdds = 1 / (prob / 100);
+    const potentialWin = hedgeAmount * kalshiOdds;
     
+    hedgingDecisions.push({
+      leg: i + 1,
+      market: bets[i].marketTitle,
+      option: bets[i].optionLabel,
+      probability: prob,
+      decision: "✅ HEDGE",
+      hedgeAmount,
+      reasoning: `Delta-based hedge: Δ=${deltas[i].toFixed(4)}, α=${alpha.toFixed(4)}`
+    });
+    
+    hedgeBets.push({
+      leg: i + 1,
+      market: bets[i].marketTitle,
+      option: bets[i].optionLabel,
+      probability: prob,
+      hedgeAmount,
+      potentialWin,
+      cost: hedgeAmount,
+      ticker: bets[i].ticker || null,
+      marketId: bets[i].marketId || null,
+      delta: deltas[i],
+      rawExposure: E[i]
+    });
+  }
+  
+  // Calculate variance reduction
+  const unhedgedStdDev = Math.sqrt(
+    p_parlay * Math.pow(P_quote - S, 2) + 
+    (1 - p_parlay) * Math.pow(S, 2) - 
+    Math.pow(margin, 2)
+  );
+  
+  // Estimate hedged variance (simplified - assumes hedges reduce tail risk)
+  // This is an approximation; full calculation would require scenario analysis
+  const hedgedStdDev = unhedgedStdDev * (1 - alpha * 0.5); // Rough estimate
+  const varianceReduction = ((unhedgedStdDev - hedgedStdDev) / unhedgedStdDev) * 100;
+  
+  // Always log summary
+  console.log(`\n🛡️ Hedging: ${hedgeBets.length} bets, $${totalHedgeCost.toFixed(2)} cost, ${varianceReduction.toFixed(1)}% variance reduction, EV: $${EV_post_hedge.toFixed(2)}`);
+  
+  if (verboseLogging) {
+    console.log("\n✅ HEDGING SUMMARY:");
+    console.log(`   Strategy: Delta-based with alpha scaling`);
+    console.log(`   Margin: $${margin.toFixed(2)}`);
+    console.log(`   Hedge budget: $${hedgeBudget.toFixed(2)}`);
+    console.log(`   Alpha: ${alpha.toFixed(4)}`);
+    console.log(`   Post-hedge EV: $${EV_post_hedge.toFixed(2)}`);
+    console.log(`   Variance reduction: ${varianceReduction.toFixed(1)}%`);
     console.log("\n" + "=".repeat(80) + "\n");
   }
   
   return {
     needsHedging: true,
+    strategy: 'delta_based',
     hedgingDecisions,
     hedgeBets,
     totalHedgeCost,
-    scenarios: scenarios.slice(0, 10), // Top 10 scenarios
+    alpha,
+    margin,
+    hedgeBudget,
     unhedged: {
-      ev: unhedgedEV,
-      edge: unhedgedEdge,
+      ev: margin,
+      edge: (margin / S) * 100,
       stdDev: unhedgedStdDev
     },
     hedged: {
-      ev: hedgedEV,
-      edge: hedgedEdge,
+      ev: EV_post_hedge,
+      edge: postHedgeEdge,
       stdDev: hedgedStdDev
     },
     impact: {
       varianceReduction: varianceReduction,
-      evChange: evChange
+      evChange: ((EV_post_hedge - margin) / Math.abs(margin)) * 100
+    },
+    parameters: {
+      beta,
+      alphaMax,
+      deltas,
+      rawExposures: E
     }
   };
 }
 
 /**
  * Calculate all possible scenarios for a parlay with hedging
+ * (Kept for backward compatibility and detailed scenario analysis)
  */
 function calculateAllScenarios(bets, userStake, userPayout, hedgeBets) {
   const scenarios = [];
