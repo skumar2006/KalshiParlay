@@ -165,13 +165,14 @@ export function calculateHedgingStrategy(
   });
   
   // Recalculate total hedge cost with minimums applied
-  const totalHedgeCost = hedges.reduce((sum, h) => sum + h, 0);
+  let totalHedgeCost = hedges.reduce((sum, h) => sum + h, 0);
   
   // Adjust alpha if total cost exceeds budget (shouldn't happen often, but safety check)
   if (totalHedgeCost > hedgeBudget * 1.1) {
     // Scale down proportionally if we're over budget
     const scaleFactor = (hedgeBudget * 1.0) / totalHedgeCost; // Use 100% of budget
     hedges = hedges.map(h => h * scaleFactor);
+    totalHedgeCost = hedges.reduce((sum, h) => sum + h, 0);
   }
   
   if (verboseLogging) {
