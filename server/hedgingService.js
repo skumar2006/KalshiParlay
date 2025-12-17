@@ -140,8 +140,39 @@ export function calculateHedgingStrategy(
   }
   
   // Step 4: Compute hedges per leg
-  const hedges = E.map(E_j => alpha * E_j);
+  let hedges = E.map(E_j => alpha * E_j);
+  
+  // Ensure minimum hedge amount per leg (guarantees every leg gets hedged)
+  // This prevents zero or near-zero hedge amounts that might get filtered out
+  const MIN_HEDGE_AMOUNT = 0.01; // Minimum $0.01 per leg
+  
+  // Find the smallest non-zero hedge amount
+  const nonZeroHedges = hedges.filter(h => h > 0);
+  const minNonZeroHedge = nonZeroHedges.length > 0 ? Math.min(...nonZeroHedges) : MIN_HEDGE_AMOUNT;
+  
+  // Apply minimum hedge amount to all legs
+  // If a hedge is zero or very small, use a proportional minimum
+  hedges = hedges.map((h, i) => {
+    if (h === 0) {
+      // If exactly zero, use 10% of smallest non-zero hedge or minimum
+      return Math.max(MIN_HEDGE_AMOUNT, minNonZeroHedge * 0.1);
+    }
+    if (h < MIN_HEDGE_AMOUNT) {
+      // If very small but non-zero, use minimum
+      return MIN_HEDGE_AMOUNT;
+    }
+    return h;
+  });
+  
+  // Recalculate total hedge cost with minimums applied
   const totalHedgeCost = hedges.reduce((sum, h) => sum + h, 0);
+  
+  // Adjust alpha if total cost exceeds budget (shouldn't happen often, but safety check)
+  if (totalHedgeCost > hedgeBudget * 1.1) {
+    // Scale down proportionally if we're over budget
+    const scaleFactor = (hedgeBudget * 1.0) / totalHedgeCost; // Use 100% of budget
+    hedges = hedges.map(h => h * scaleFactor);
+  }
   
   if (verboseLogging) {
     console.log("\n🛡️  HEDGE SIZES PER LEG:");
@@ -152,7 +183,7 @@ export function calculateHedgingStrategy(
       console.log(`   Leg ${i + 1}: $${hedgeAmount.toFixed(2)}`);
       console.log(`      If wins: Return $${potentialWin.toFixed(2)} (profit: $${(potentialWin - hedgeAmount).toFixed(2)})`);
     });
-    console.log(`   Total hedge cost: $${totalHedgeCost.toFixed(2)}`);
+    console.log(`   Total hedge cost: $${hedges.reduce((sum, h) => sum + h, 0).toFixed(2)}`);
   }
   
   // Step 5: Compute post-hedge EV
@@ -169,14 +200,19 @@ export function calculateHedgingStrategy(
   }
   
   // Build hedge bets array (for compatibility with existing code)
+  // IMPORTANT: Create hedge bets for ALL legs, ensuring every leg is hedged
   const hedgeBets = [];
   const hedgingDecisions = [];
+  
+  console.log(`\n📊 CREATING HEDGE BETS FOR ${n} LEGS:`);
   
   for (let i = 0; i < n; i++) {
     const hedgeAmount = hedges[i];
     const prob = bets[i].prob;
     const kalshiOdds = 1 / (prob / 100);
     const potentialWin = hedgeAmount * kalshiOdds;
+    
+    console.log(`   Leg ${i + 1}/${n}: ${bets[i].marketTitle} - $${hedgeAmount.toFixed(2)}`);
     
     hedgingDecisions.push({
       leg: i + 1,
@@ -202,6 +238,8 @@ export function calculateHedgingStrategy(
       rawExposure: E[i]
     });
   }
+  
+  console.log(`✅ Created ${hedgeBets.length} hedge bets for ${n} legs (should match!)`);
   
   // Calculate variance reduction
   const unhedgedStdDev = Math.sqrt(
