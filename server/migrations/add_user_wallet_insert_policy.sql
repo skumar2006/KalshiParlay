@@ -12,3 +12,5 @@ WITH CHECK (auth.uid() = user_uuid);
 -- DROP POLICY IF EXISTS "Users can insert own wallet" ON user_wallet;
 
 
+
+

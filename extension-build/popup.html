@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Kalshi Parlay Helper</title>
+    <link rel="icon" type="image/png" href="public/KalshiParlay Logo (3).png" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <!-- Initial Loading Screen -->
+    <div id="initial-loading" class="initial-loading">
+      <img src="public/KalshiParlay Logo (3).png" alt="Kalshi Parlay" class="loading-logo" />
+    </div>
+
+    <div class="app">
+      <!-- Top bar with profile and menu buttons -->
+      <div class="top-bar">
+        <button id="profile-btn" class="icon-btn" title="Profile">
+          <img src="public/pfp.svg" alt="Profile" />
+        </button>
+        <div class="logo-container">
+          <img src="public/KalshiParlay_Logo__1_-removebg-preview (1).png" alt="Kalshi Parlay" class="logo" />
+        </div>
+        <button id="menu-btn" class="icon-btn" title="Menu">
+          <img src="public/menu.svg" alt="Menu" />
+        </button>
+      </div>
+
+      <header class="market-header">
+        <div class="market-icon">
+          <img id="market-image" alt="" />
+        </div>
+        <div class="market-title-container">
+          <div class="market-label">Current Market</div>
+          <div id="market-title" class="market-title">Not a Kalshi market page</div>
+        </div>
+      </header>
+
+      <section class="market-options">
+        <div id="options-container" class="options-container">
+          <div class="option-row placeholder">
+            <span class="option-label">Loading...</span>
+          </div>
+        </div>
+      </section>
+
+      <button id="add-to-parlay-btn" class="add-to-parlay-btn" disabled>
+        Add to Parlay
+      </button>
+
+      <section class="current-parlay">
+        <h2>Current Parlay:</h2>
+        <div id="parlay-container" class="parlay-container">
+          <div class="empty-parlay">No bets added yet</div>
+        </div>
+      </section>
+
+      <button id="place-bet-btn" class="place-bet-btn" disabled>
+        Place Your Bet
+      </button>
+
+      <!-- Wallet Section -->
+      <section class="wallet-section">
+      </section>
+    </div>
+
+    <!-- Withdrawal Modal -->
+    <div id="withdraw-overlay" class="bet-overlay hidden">
+      <div class="bet-modal">
+        <div class="bet-modal-header">
+          <h2>Withdraw Funds</h2>
+          <button id="close-withdraw-btn" class="close-overlay-btn">
+            <img src="public/close.svg" alt="Close" />
+          </button>
+        </div>
+        
+        <div class="bet-modal-body">
+          <div class="wallet-info">
+            <div class="wallet-info-row">
+              <span>Available Balance:</span>
+              <span id="modal-wallet-balance" class="wallet-balance-amount">$0.00</span>
+            </div>
+          </div>
+
+          <div class="stake-input-section">
+            <label for="withdraw-amount-input">Withdrawal Amount ($)</label>
+            <input 
+              type="number" 
+              id="withdraw-amount-input" 
+              class="stake-input" 
+              placeholder="Enter amount"
+              min="0"
+              step="0.01"
+            />
+          </div>
+
+          <div class="connect-bank-message" id="connect-bank-message" style="display: none;">
+            <p>To withdraw funds, please connect your bank account via Stripe.</p>
+            <button id="modal-connect-bank-btn" class="connect-bank-btn">Connect Bank Account</button>
+          </div>
+
+          <div class="withdrawal-note">
+            <p><strong>Note:</strong> Funds will be transferred to your Stripe account. You can then withdraw to your bank account from your Stripe dashboard, or funds will be automatically paid out.</p>
+          </div>
+
+          <!-- Error message display -->
+          <div id="withdraw-error-message" class="bet-error-message hidden">
+          </div>
+        </div>
+
+        <div class="bet-modal-footer">
+          <button id="confirm-withdraw-btn" class="get-quote-btn" disabled>
+            Request Withdrawal
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bet Overlay Modal -->
+    <div id="bet-overlay" class="bet-overlay hidden">
+      <div class="bet-modal">
+        <div class="bet-modal-header">
+          <h2>Place Your Parlay</h2>
+          <button id="close-overlay-btn" class="close-overlay-btn">
+            <img src="public/close.svg" alt="Close" />
+          </button>
+        </div>
+        
+        <div class="bet-modal-body">
+          <div class="parlay-summary">
+            <h3>Your Parlay</h3>
+            <div id="modal-parlay-list" class="modal-parlay-list">
+              <!-- Parlay items will be inserted here -->
+            </div>
+            <div class="combined-odds">
+              <span>Combined Probability:</span>
+              <span id="combined-prob" class="combined-prob-value">0%</span>
+            </div>
+          </div>
+
+          <div class="stake-input-section">
+            <label for="stake-input">Stake Amount ($)</label>
+            <input 
+              type="number" 
+              id="stake-input" 
+              class="stake-input" 
+              placeholder="Enter amount"
+              min="0"
+              step="0.01"
+            />
+          </div>
+
+          <div class="potential-payout">
+            <span>Potential Payout:</span>
+            <span id="potential-payout" class="payout-value">$0.00</span>
+          </div>
+
+          <!-- Error message display -->
+          <div id="bet-error-message" class="bet-error-message hidden">
+            <span id="bet-error-text"></span>
+          </div>
+        </div>
+
+        <div class="bet-modal-footer">
+          <button id="get-quote-btn" class="get-quote-btn" disabled>
+            Get Quote
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Buy Credits Modal -->
+    <div id="buy-credits-overlay" class="bet-overlay hidden">
+      <div class="bet-modal">
+        <div class="bet-modal-header">
+          <h2>Buy Credits</h2>
+          <button id="close-buy-credits-btn" class="close-overlay-btn">
+            <img src="public/close.svg" alt="Close" />
+          </button>
+        </div>
+        
+        <div class="bet-modal-body">
+          <div class="wallet-info">
+            <div class="wallet-info-row">
+              <span>Current Balance:</span>
+              <span id="buy-credits-current-balance" class="wallet-balance-amount">$0.00</span>
+            </div>
+          </div>
+
+          <div class="stake-input-section">
+            <label for="buy-credits-amount-input">Amount to Purchase ($)</label>
+            <input 
+              type="number" 
+              id="buy-credits-amount-input" 
+              class="stake-input" 
+              placeholder="Enter amount (min $5)"
+              min="5"
+              max="1000"
+              step="0.01"
+            />
+            <p class="input-hint">Minimum: $5 | Maximum: $1,000</p>
+          </div>
+
+          <div class="credit-purchase-note">
+            <p><strong>Note:</strong> Credits will be added to your wallet immediately after payment. You can use them to place parlay bets.</p>
+          </div>
+
+          <!-- Error message display -->
+          <div id="buy-credits-error-message" class="bet-error-message hidden">
+          </div>
+        </div>
+
+        <div class="bet-modal-footer">
+          <button id="confirm-buy-credits-btn" class="get-quote-btn" disabled>
+            Continue to Payment
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Profile Overlay -->
+    <div id="profile-overlay" class="bet-overlay hidden">
+      <div class="bet-modal">
+        <div class="bet-modal-header">
+          <h2 id="profile-header-title">Profile</h2>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <button id="profile-back-btn" class="close-overlay-btn" style="display: none;">
+              <img src="public/backward.svg" alt="Back" />
+            </button>
+            <button id="close-profile-btn" class="close-overlay-btn">
+              <img src="public/close.svg" alt="Close" />
+            </button>
+          </div>
+        </div>
+        <div class="bet-modal-body">
+          <!-- Profile View -->
+          <div id="profile-content" class="profile-view">
+            <p><strong>Email:</strong> <span id="profile-email">-</span></p>
+            
+            <!-- Wallet Section -->
+            <div style="margin-top: 24px; padding-top: 24px; border-top: 1px solid #e0e0e0;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                <div>
+                  <div style="font-size: 12px; color: #777; margin-bottom: 4px;">Available Balance</div>
+                  <div id="profile-wallet-balance" class="wallet-balance-amount" style="font-size: 24px; font-weight: 600;">$0.00</div>
+                </div>
+                <button id="profile-refresh-wallet-btn" class="refresh-btn" title="Refresh">↻</button>
+              </div>
+              
+              <div style="display: flex; flex-direction: column; gap: 8px;">
+                <button id="profile-buy-credits-btn" class="buy-credits-btn" style="width: 100%;">
+                  Buy Credits
+                </button>
+                <button id="profile-connect-bank-btn" class="connect-bank-btn" style="display: none; width: 100%;">
+                  Connect Bank Account
+                </button>
+                <button id="profile-withdraw-btn" class="withdraw-btn" disabled style="width: 100%;">
+                  Withdraw Funds
+                </button>
+              </div>
+            </div>
+            
+            <button id="profile-logout-btn" class="get-quote-btn" style="margin-top: 24px; width: 100%;">Logout</button>
+          </div>
+          
+          <!-- Buy Credits View -->
+          <div id="profile-buy-credits-content" class="profile-view" style="display: none;">
+            <div class="wallet-info">
+              <div class="wallet-info-row">
+                <span>Current Balance:</span>
+                <span id="profile-buy-credits-current-balance" class="wallet-balance-amount">$0.00</span>
+              </div>
+            </div>
+
+            <div class="stake-input-section">
+              <label for="profile-buy-credits-amount-input">Amount to Purchase ($)</label>
+              <input 
+                type="number" 
+                id="profile-buy-credits-amount-input" 
+                class="stake-input" 
+                placeholder="Enter amount (min $5)"
+                min="5"
+                max="1000"
+                step="0.01"
+              />
+              <p class="input-hint">Minimum: $5 | Maximum: $1,000</p>
+            </div>
+
+            <div class="credit-purchase-note">
+              <p><strong>Note:</strong> Credits will be added to your wallet immediately after payment. You can use them to place parlay bets.</p>
+            </div>
+
+            <!-- Error message display -->
+            <div id="profile-buy-credits-error-message" class="bet-error-message hidden">
+            </div>
+          </div>
+          
+          <!-- Withdraw View -->
+          <div id="profile-withdraw-content" class="profile-view" style="display: none;">
+            <div class="wallet-info">
+              <div class="wallet-info-row">
+                <span>Available Balance:</span>
+                <span id="profile-modal-wallet-balance" class="wallet-balance-amount">$0.00</span>
+              </div>
+            </div>
+
+            <div class="stake-input-section">
+              <label for="profile-withdraw-amount-input">Withdrawal Amount ($)</label>
+              <input 
+                type="number" 
+                id="profile-withdraw-amount-input" 
+                class="stake-input" 
+                placeholder="Enter amount"
+                min="0"
+                step="0.01"
+              />
+            </div>
+
+            <div class="connect-bank-message" id="profile-connect-bank-message" style="display: none;">
+              <p>To withdraw funds, please connect your bank account via Stripe.</p>
+              <button id="profile-modal-connect-bank-btn" class="connect-bank-btn">Connect Bank Account</button>
+            </div>
+
+            <div class="withdrawal-note">
+              <p><strong>Note:</strong> Funds will be transferred to your Stripe account. You can then withdraw to your bank account from your Stripe dashboard, or funds will be automatically paid out.</p>
+            </div>
+
+            <!-- Error message display -->
+            <div id="profile-withdraw-error-message" class="bet-error-message hidden">
+            </div>
+          </div>
+        </div>
+        
+        <!-- Footer for Buy Credits and Withdraw views -->
+        <div class="bet-modal-footer" id="profile-footer" style="display: none;">
+          <button id="profile-confirm-buy-credits-btn" class="get-quote-btn" disabled style="width: 100%;">
+            Continue to Payment
+          </button>
+          <button id="profile-confirm-withdraw-btn" class="get-quote-btn" disabled style="width: 100%;">
+            Request Withdrawal
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Menu Overlay -->
+    <div id="menu-overlay" class="bet-overlay hidden">
+      <div class="bet-modal">
+        <div class="bet-modal-header">
+          <h2 id="menu-header-title">Menu</h2>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <button id="menu-back-btn" class="close-overlay-btn" style="display: none;">
+              <img src="public/backward.svg" alt="Back" />
+            </button>
+            <button id="close-menu-btn" class="close-overlay-btn">
+              <img src="public/close.svg" alt="Close" />
+            </button>
+          </div>
+        </div>
+        <div class="bet-modal-body">
+          <!-- Menu Main View -->
+          <div id="menu-main-content" class="menu-view">
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+              <button id="menu-current-parlays-btn" class="get-quote-btn" style="width: 100%; text-align: center; justify-content: center;">
+                Current Parlays
+              </button>
+              <button id="menu-parlay-history-btn" class="get-quote-btn" style="width: 100%; text-align: center; justify-content: center;">
+                Previous Parlay History
+              </button>
+            </div>
+          </div>
+          
+          <!-- Current Parlays View -->
+          <div id="menu-current-parlays-content" class="menu-view" style="display: none;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+              <h3 style="margin: 0;">Current Parlays</h3>
+            </div>
+            <div id="menu-parlay-container" class="parlay-container" style="max-height: 400px; overflow-y: auto;">
+              <!-- Current parlay bets will be rendered here -->
+            </div>
+          </div>
+          
+          <!-- Previous Parlay History View -->
+          <div id="menu-parlay-history-content" class="menu-view" style="display: none;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+              <h3 style="margin: 0;">Previous Parlay History</h3>
+              <button id="menu-refresh-parlay-history-btn" class="refresh-btn" title="Refresh">↻</button>
+            </div>
+            <div id="menu-parlay-history-container" class="parlay-history-container" style="max-height: 400px; overflow-y: auto;">
+              <!-- Parlay history will be rendered here -->
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Login Modal -->
+    <div id="login-overlay" class="bet-overlay">
+      <div class="bet-modal">
+        <div class="bet-modal-header">
+          <h2>Login / Sign Up</h2>
+          <button id="close-login-btn" class="close-overlay-btn" style="display: none;">
+            <img src="public/close.svg" alt="Close" />
+          </button>
+        </div>
+        <div class="bet-modal-body">
+          <div id="login-form">
+            <div class="stake-input-section">
+              <label for="email-input">Email</label>
+              <input 
+                type="email" 
+                id="email-input" 
+                class="stake-input" 
+                placeholder="your@email.com" 
+                autocomplete="email"
+              />
+            </div>
+            <div class="stake-input-section">
+              <label for="password-input">Password</label>
+              <input 
+                type="password" 
+                id="password-input" 
+                class="stake-input" 
+                placeholder="Password (min 6 characters)" 
+                autocomplete="current-password"
+              />
+            </div>
+            <div id="login-error-message" class="bet-error-message hidden"></div>
+            <div class="auth-buttons" style="display: flex; gap: 8px; margin-top: 16px;">
+              <button id="login-btn" class="get-quote-btn" style="flex: 1;">Login</button>
+              <button id="signup-btn" class="get-quote-btn secondary" style="flex: 1; background: #6c757d;">Sign Up</button>
+            </div>
+          </div>
+          <div id="user-info" class="hidden" style="text-align: center;">
+            <p>Logged in as: <strong id="user-email"></strong></p>
+            <button id="logout-btn" class="get-quote-btn" style="margin-top: 16px;">Logout</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add Supabase client script BEFORE popup.js -->
+    <script src="supabase.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>
+
+
