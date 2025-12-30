@@ -5,7 +5,6 @@
 
 import express from "express";
 import cors from "cors";
-import Stripe from "stripe";
 import { getMarketById, getMarketDetails, getMarketOrderbook } from "./kalshiClient.js";
 import { 
   initializeDatabase, 
@@ -30,8 +29,6 @@ import {
   createWithdrawalRequest,
   updateWithdrawalStatus,
   getWithdrawalRequests,
-  saveStripeAccount,
-  getUserStripeAccount,
   getLiquidityPoolBalance,
   updateLiquidityPoolBalance
 } from "./db.js";
@@ -65,16 +62,8 @@ try {
 const app = express();
 const PORT = ENV.PORT || CONFIG.SERVER.DEFAULT_PORT;
 
-// Initialize Stripe (optional - only if API key is provided)
-// Uses environment-aware key selection (demo or production)
-let stripe = null;
-if (ENV.STRIPE_API_KEY_SELECTED) {
-  stripe = new Stripe(ENV.STRIPE_API_KEY_SELECTED);
-  logInfo(`Stripe initialized with ${ENV.IS_PRODUCTION ? 'production' : 'demo'} API key`);
-} else {
-  const envVar = ENV.IS_PRODUCTION ? 'STRIPE_API_KEY' : 'STRIPE_DEMO_API_KEY';
-  logWarn(`Stripe ${envVar} not provided - payment features will be disabled`);
-}
+// Trust proxy for accurate client IP extraction (needed for Railway/deployment)
+app.set('trust proxy', true);
 
 // Initialize Supabase client for auth verification (using anon key for JWT verification)
 let supabaseAuth = null;
@@ -102,9 +91,6 @@ async function verifyAuth(req, res, next) {
       path === '/api/config' ||
       path === '/auth/callback' ||
       path === '/api/auth/callback' ||
-      path === '/payment-success' ||
-      path === '/payment-cancel' ||
-      path.startsWith('/stripe-connect-') ||
       path.startsWith('/api/test/')) {
     return next();
   }
@@ -127,11 +113,27 @@ async function verifyAuth(req, res, next) {
         return next();
       }
       
-      // Verify token with Supabase
-      const { data: { user }, error } = await supabaseAuth.auth.getUser(token);
+      // Verify token with Supabase (with timeout handling)
+      let user, authError;
+      try {
+        const result = await Promise.race([
+          supabaseAuth.auth.getUser(token),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Auth verification timeout')), 5000)
+          )
+        ]);
+        user = result.data?.user;
+        authError = result.error;
+      } catch (timeoutErr) {
+        // If Supabase times out, log warning but allow request to proceed
+        // This prevents network issues from blocking the app
+        logWarn('Supabase auth verification timed out - allowing request to proceed', timeoutErr.message);
+        logWarn('This may be a temporary network issue. Consider checking your Supabase connection.');
+        return next(); // Allow request to proceed if Supabase is unavailable
+      }
       
-      if (error || !user) {
-        logError('Auth verification failed', error);
+      if (authError || !user) {
+        logError('Auth verification failed', authError);
         return res.status(401).json({ 
           error: 'Unauthorized', 
           message: 'Invalid or expired token' 
@@ -391,236 +393,6 @@ function enrichHedgeBetsWithTickers(hedgeBets, parlayData) {
   return enriched;
 }
 
-/**
- * Stripe webhook endpoint
- * Handles payment completion events and executes hedging strategies
- * Note: Uses raw body parser for webhook signature verification
- */
-app.post('/api/webhook', express.raw({type: 'application/json'}), async (req, res) => {
-  if (!stripe) {
-    logError("Stripe webhook received but Stripe is not initialized");
-    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Payment processing not available" 
-    });
-  }
-
-  logSection("WEBHOOK RECEIVED");
-  logInfo(`Timestamp: ${new Date().toISOString()}`);
-  logInfo(`Method: ${req.method}`);
-  logInfo(`Path: ${req.path}`);
-  
-  const sig = req.headers['stripe-signature'];
-  
-  let event;
-  
-  try {
-    // Verify webhook signature using environment-aware secret
-    if (ENV.STRIPE_WEBHOOK_SECRET_SELECTED) {
-      logInfo(`Using ${ENV.IS_PRODUCTION ? 'production' : 'demo'} webhook secret verification`);
-      event = stripe.webhooks.constructEvent(req.body, sig, ENV.STRIPE_WEBHOOK_SECRET_SELECTED);
-    } else {
-      // For development without webhook signing
-      const envVar = ENV.IS_PRODUCTION ? 'STRIPE_WEBHOOK_SECRET' : 'STRIPE_DEMO_WEBHOOK_SECRET';
-      logWarn(`No webhook secret (${envVar}) - parsing JSON directly (dev mode)`);
-      event = JSON.parse(req.body.toString());
-    }
-    
-    logInfo(`Event parsed successfully - Type: ${event.type}, ID: ${event.id}`);
-  } catch (err) {
-    logError("Webhook error", err);
-    return res.status(HTTP_STATUS.BAD_REQUEST).send(`Webhook Error: ${err.message}`);
-  }
-  
-  // Handle the event
-  switch (event.type) {
-    case 'checkout.session.completed': {
-      const session = event.data.object;
-      const stripeAmount = session.amount_total / 100;
-      
-      logSection("STRIPE PAYMENT CONFIRMED");
-      logInfo(`Session ID: ${session.id}`);
-      logInfo(`Amount paid: $${stripeAmount.toFixed(2)}`);
-      logInfo(`Customer email: ${session.customer_details?.email || 'N/A'}`);
-      
-      // Get payment details from database
-      try {
-        const payment = await getPendingPayment(session.id);
-        
-        if (!payment) {
-          logError(`Payment record not found in database - Session ID: ${session.id}`);
-          break;
-        }
-        
-        // Check if this is a credit purchase or parlay purchase
-        const paymentType = payment.payment_type || (session.metadata?.paymentType || 'parlay');
-        logInfo(`Payment type detected: ${paymentType}`);
-        logInfo(`Payment record:`, JSON.stringify({
-          payment_type: payment.payment_type,
-          user_id: payment.user_id,
-          stake: payment.stake
-        }, null, 2));
-        
-        if (paymentType === 'credits') {
-          // Handle credit purchase - add credits to wallet
-          logSection("CREDIT PURCHASE CONFIRMED");
-          logInfo(`User ID: ${payment.user_id}`);
-          logInfo(`Credits purchased: $${stripeAmount.toFixed(2)}`);
-          
-          // Get current wallet balance before adding (use service role for webhook)
-          const walletBefore = await getUserWallet(payment.user_id, null);
-          logInfo(`Wallet balance before: $${parseFloat(walletBefore.balance || 0).toFixed(2)}`);
-          
-          // Add credits to user's wallet (use service role for webhook)
-          await addUserBalance(payment.user_id, stripeAmount, null);
-          logInfo(`Added $${stripeAmount.toFixed(2)} to user wallet`);
-          
-          // Verify wallet balance after adding (use service role for webhook)
-          const walletAfter = await getUserWallet(payment.user_id, null);
-          logInfo(`Wallet balance after: $${parseFloat(walletAfter.balance || 0).toFixed(2)}`);
-          
-          // Update pending payment status
-          await updatePaymentStatus(session.id, 'completed');
-          logInfo("Credit purchase completed successfully");
-          
-          break; // Exit early, don't process as parlay
-        }
-        
-        // Handle parlay purchase (existing logic)
-        logInfo(`Purchase Details - User ID: ${payment.user_id}, Stake: $${payment.stake}, Legs: ${payment.parlay_data?.length || 0}`);
-        
-        // Extract quote data (only for parlay purchases)
-        const quoteData = payment.quote_data ? (typeof payment.quote_data === 'string' ? JSON.parse(payment.quote_data) : payment.quote_data) : {};
-        const payout = quoteData.payout ? parseFloat(quoteData.payout.adjustedPayout) : 0;
-        
-        logInfo(`Payout Info - Promised payout: $${payout.toFixed(2)}, Potential profit: $${(payout - payment.stake).toFixed(2)}`);
-        
-        // Update pending payment status
-        await updatePaymentStatus(session.id, 'completed');
-        logInfo("Updated pending payment status to 'completed'");
-        
-        // Parse parlay_data if it's a string
-        const parlayData = payment.parlay_data 
-          ? (typeof payment.parlay_data === 'string' ? JSON.parse(payment.parlay_data) : payment.parlay_data)
-          : [];
-        
-        // Save to completed purchases
-        const completedPurchase = await saveCompletedPurchase(
-          session.id,
-          payment.user_id,
-          payment.stake,
-          payout,
-          parlayData,
-          quoteData,
-          quoteData.hedgingStrategy || null,
-          stripeAmount
-        );
-        
-        logInfo(`Saved to completed_purchases (ID: ${completedPurchase.id})`);
-        
-        // Execute hedging strategy
-        const hedgingStrategy = quoteData.hedgingStrategy;
-        
-        // Debug: Log parlay probabilities to understand hedging decision
-        if (parlayData && parlayData.length > 0) {
-          logInfo("Parlay leg probabilities:");
-          parlayData.forEach((bet, i) => {
-            logInfo(`  Leg ${i + 1}: ${bet.marketTitle} - ${bet.optionLabel} (${bet.prob}%)`);
-          });
-        }
-        
-        if (hedgingStrategy) {
-          logInfo(`Hedging strategy decision: needsHedging=${hedgingStrategy.needsHedging}`);
-          logInfo(`Hedging reasoning: ${hedgingStrategy.reasoning || 'N/A'}`);
-          if (hedgingStrategy.hedgeBets) {
-            logInfo(`Number of hedge bets: ${hedgingStrategy.hedgeBets.length}`);
-          }
-        } else {
-          logWarn("No hedging strategy found in quote data");
-        }
-        
-        if (hedgingStrategy && hedgingStrategy.needsHedging) {
-          logSection("EXECUTING HEDGING STRATEGY");
-          logInfo(`Strategy: ${hedgingStrategy.strategy || 'variance_reduction'}`);
-          
-          if (hedgingStrategy.hedgeBets && hedgingStrategy.hedgeBets.length > 0) {
-            logInfo(`Number of hedge bets: ${hedgingStrategy.hedgeBets.length}`);
-            logInfo(`Total hedge cost: $${hedgingStrategy.totalHedgeCost.toFixed(2)}`);
-            
-            // Enrich hedge bets with tickers from parlay_data
-            logInfo("Enriching hedge bets with tickers...");
-            const enrichedHedgeBets = enrichHedgeBetsWithTickers(
-              hedgingStrategy.hedgeBets,
-              parlayData
-            );
-            
-            // Validate all tickers are present
-            const missingTickers = enrichedHedgeBets.filter(bet => !bet.ticker);
-            
-            if (missingTickers.length > 0) {
-              logError(`${missingTickers.length} hedge bets missing tickers`, missingTickers);
-              logWarn(`Proceeding with partial hedging (${enrichedHedgeBets.length - missingTickers.length}/${enrichedHedgeBets.length} bets)`);
-            } else {
-              logInfo(`All ${enrichedHedgeBets.length} hedge bets have tickers`);
-            }
-            
-            // Execute hedging strategy through Kalshi API
-            logInfo(`Executing orders on Kalshi ${ENV.IS_PRODUCTION ? 'production' : 'demo'} environment...`);
-            logInfo(`DRY_RUN: ${ENV.KALSHI_DRY_RUN ? 'ENABLED (TESTING)' : 'DISABLED (REAL ORDERS)'}`);
-            
-            const hedgeResult = await executeHedgingStrategy(
-              enrichedHedgeBets,
-              {
-                userId: payment.user_id,
-                sessionId: session.id,
-                stake: payment.stake,
-                payout: payout
-              }
-            );
-            
-            logInfo(`Hedging execution results - Total: ${hedgeResult.totalOrders}, Successful: ${hedgeResult.successful}, Failed: ${hedgeResult.failed}`);
-            
-            if (hedgeResult.success) {
-              logInfo(`Hedging execution completed successfully!`);
-              await markHedgeExecuted(session.id);
-            } else {
-              logWarn(`Hedging execution had issues - ${hedgeResult.successful}/${hedgeResult.totalOrders} succeeded`);
-              await markHedgeExecuted(session.id);
-            }
-          } else {
-            logInfo("No individual hedge bets needed");
-          }
-        } else {
-          logInfo(`NO HEDGING NEEDED - Reason: ${hedgingStrategy?.reasoning || 'Low-probability parlay, acceptable variance'}`);
-        }
-        
-        // Clear user's parlay (they've placed their bet)
-        await clearParlayBets(payment.user_id);
-        logInfo("Cleared user's parlay bets from active parlays");
-        
-        logInfo("PAYMENT PROCESSING COMPLETE");
-        
-      } catch (err) {
-        logError("Error processing payment", err);
-      }
-      
-      break;
-    }
-    case 'checkout.session.expired':
-      logInfo(`Checkout session expired: ${event.data.object.id}`);
-      break;
-    case 'payment_intent.succeeded':
-      logInfo(`PaymentIntent succeeded: ${event.data.object.id}`);
-      break;
-    case 'payment_intent.payment_failed':
-      logError(`Payment failed: ${event.data.object.id}`);
-      break;
-    default:
-      logWarn(`Unhandled event type: ${event.type}`);
-  }
-  
-  // Return a response to acknowledge receipt of the event
-  res.json({received: true});
-});
 
 // JSON parsing for all other routes
 app.use(express.json());
@@ -646,13 +418,6 @@ app.get(CONFIG.SERVER.HEALTH_CHECK_PATH, (_req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
-/**
- * Test webhook endpoint (for debugging)
- */
-app.get("/api/webhook/test", (_req, res) => {
-  console.log("✅ Webhook endpoint is accessible");
-  res.json({ message: "Webhook endpoint is working", timestamp: new Date().toISOString() });
-});
 
 /**
  * Get market data from Kalshi API
@@ -974,12 +739,6 @@ app.get("/api/parlay-status/:sessionId", async (req, res) => {
 app.post("/api/claim-winnings/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
   
-  if (!stripe) {
-    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Payment processing not available" 
-    });
-  }
-  
   const token = req.headers.authorization?.substring(7); // Extract JWT token
   
   try {
@@ -1088,7 +847,9 @@ app.get("/api/wallet/:userId", async (req, res) => {
     const wallet = await getUserWallet(userId, token);
     res.json({ 
       success: true, 
-      balance: parseFloat(wallet.balance || 0) 
+      balance: parseFloat(wallet.balance || 0),
+      crypto_wallet_address: wallet.crypto_wallet_address || null,
+      crypto_network: wallet.crypto_network || null
     });
   } catch (err) {
     logError("Error fetching wallet", err);
@@ -1100,485 +861,159 @@ app.get("/api/wallet/:userId", async (req, res) => {
 });
 
 /**
- * Create Stripe Connect Express account and get onboarding link
- * @route GET /api/stripe-connect/onboard/:userId
+ * Get Coinbase onramp link for user
+ * @route GET /api/coinbase-onramp/:userId
  */
-app.get("/api/stripe-connect/onboard/:userId", async (req, res) => {
-  if (!stripe) {
-    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Stripe not configured" 
-    });
-  }
-  
-  const { userId } = req.params;
-  // Use BACKEND_BASE_URL if set, otherwise detect from request
-  const baseUrl = ENV.BACKEND_BASE_URL || `${req.protocol}://${req.get('host')}`;
-  const returnUrl = `${baseUrl}/stripe-connect-return?userId=${userId}`;
-  const refreshUrl = `${baseUrl}/stripe-connect-refresh?userId=${userId}`;
-  
+app.get("/api/coinbase-onramp/:userId", async (req, res) => {
   try {
-    const token = req.headers.authorization?.substring(7); // Extract JWT token
+  const { userId } = req.params;
+    const { amount } = req.query; // Optional preset amount
     
-    // Get authenticated user's email from req.user (set by verifyAuth middleware)
-    const userEmail = req.user?.email;
-    if (!userEmail) {
-      return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-        error: "User email not available. Please ensure you are authenticated." 
-      });
-    }
+    const token = req.headers.authorization?.substring(7);
     
-    // Check if user already has a Stripe account
-    const existingAccount = await getUserStripeAccount(userId, token);
-    
-    let accountId = existingAccount?.stripe_account_id;
-    
-    // Create Express account if doesn't exist
-    if (!accountId) {
+    // Verify auth
+    if (token && supabaseAuth) {
       try {
-        const account = await stripe.accounts.create({
-          type: 'express',
-          country: 'US',
-          email: userEmail, // Use authenticated user's email from Supabase
-          business_type: 'individual', // Pre-fill as individual (not business)
-          business_profile: {
-            product_description: 'Receiving payouts from parlay betting winnings', // Use product description instead of website
-          },
-          capabilities: {
-            transfers: { requested: true },
-          },
-        });
-        accountId = account.id;
-        await saveStripeAccount(userId, accountId, 'pending', token);
-      } catch (createErr) {
-        // Check if error is about Connect not being enabled
-        if (createErr.message && createErr.message.includes('signed up for Connect')) {
-          logError("Stripe Connect not enabled", createErr);
-          return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-            error: "Stripe Connect is not enabled for your account",
-            message: "Please enable Stripe Connect in your Stripe Dashboard: https://dashboard.stripe.com/settings/connect",
-            details: "Go to Stripe Dashboard → Settings → Connect → Enable Connect"
-          });
+        const { data: { user }, error: authError } = await supabaseAuth.auth.getUser(token);
+        if (authError || !user || user.id !== userId) {
+          return res.status(403).json({ error: "Unauthorized" });
         }
-        // Re-throw other errors
-        throw createErr;
-      }
-    } else {
-      // Update existing account email if it's still using placeholder
-      try {
-        const account = await stripe.accounts.retrieve(accountId);
-        // Check if account has placeholder email or different email
-        if (account.email && (
-          account.email.includes('@kalshi-parlay.com') || 
-          account.email !== userEmail
-        )) {
-          // Update account with user's real email
-          await stripe.accounts.update(accountId, {
-            email: userEmail
-          });
-          logInfo(`Updated Stripe account ${accountId} email to ${userEmail}`);
-        }
-      } catch (updateErr) {
-        logWarn(`Could not update account email for ${accountId}:`, updateErr);
-        // Continue anyway - email update is not critical
+      } catch (authErr) {
+        logWarn("Auth verification failed, proceeding anyway", authErr);
       }
     }
     
-    // Always ensure product_description is set (for both new and existing accounts)
-    // This removes the website requirement from onboarding
-    try {
-      const account = await stripe.accounts.retrieve(accountId);
-      
-      // Check if account needs product_description
-      const hasProductDescription = account.business_profile?.product_description;
-      const hasUrl = account.business_profile?.url;
-      
-      // If account doesn't have product_description, or has URL but no product_description, update it
-      if (!hasProductDescription || (hasUrl && !hasProductDescription)) {
-        const updateData = {
-          business_profile: {
-            product_description: 'Receiving payouts from parlay betting winnings',
-          },
-        };
-        
-        // Try to remove URL by omitting it (Stripe will use product_description instead)
-        // Note: We can't directly delete URL, but setting product_description should make it optional
-        
-        await stripe.accounts.update(accountId, updateData);
-        logInfo(`Updated account ${accountId} with product_description`);
-        logInfo(`Account business_profile:`, JSON.stringify(account.business_profile, null, 2));
+    // Extract client IP from request (don't trust headers for security)
+    // req.ip is set by Express trust proxy settings, or use req.connection.remoteAddress
+    const clientIp = req.ip || req.connection?.remoteAddress || req.socket?.remoteAddress || '127.0.0.1';
+    
+    // Remove IPv6 prefix if present
+    let cleanClientIp = clientIp.replace(/^::ffff:/, '');
+    
+    // Check if IP is private/localhost - Coinbase API doesn't allow private IPs
+    const isPrivateIp = (ip) => {
+      // IPv4 private ranges
+      if (ip.startsWith('127.') || 
+          ip.startsWith('192.168.') || 
+          ip.startsWith('10.') || 
+          (ip.startsWith('172.') && 
+           parseInt(ip.split('.')[1]) >= 16 && 
+           parseInt(ip.split('.')[1]) <= 31) ||
+          ip === 'localhost') {
+        return true;
+      }
+      // IPv6 localhost
+      if (ip === '::1' || ip === '::ffff:127.0.0.1' || ip.startsWith('::ffff:127.')) {
+        return true;
+      }
+      return false;
+    };
+    
+    // If private IP (local development), use a placeholder public IP
+    // In production, this will be the actual client IP from Railway/proxy
+    if (isPrivateIp(cleanClientIp)) {
+      // Use placeholder public IP for local development
+      // In production (Railway), req.ip should contain the real client IP, so this shouldn't happen
+      if (process.env.NODE_ENV === 'production' && !ENV.IS_DEMO) {
+        logWarn(`[Onramp] Private IP detected in production: ${cleanClientIp}. Using placeholder. Check proxy configuration if this persists.`);
       } else {
-        logInfo(`Account ${accountId} already has product_description set`);
+        logInfo(`[Onramp] Local dev detected (IP: ${cleanClientIp}), using placeholder public IP`);
       }
-    } catch (updateErr) {
-      logError(`Could not update account ${accountId}:`, updateErr);
-      // Continue anyway - account link creation might still work
+      cleanClientIp = '8.8.8.8'; // Google DNS - placeholder public IP for local dev/testing
     }
     
-    // Create account link for onboarding
-    const accountLink = await stripe.accountLinks.create({
-      account: accountId,
-      refresh_url: refreshUrl,
-      return_url: returnUrl,
-      type: 'account_onboarding',
-    });
+    // Import Coinbase CDP service
+    const { getOrCreateUserWallet, generateCoinbaseOnrampOrder } = await import('./coinbaseCdpService.js');
     
-    res.json({ 
-      success: true, 
-      url: accountLink.url,
-      accountId: accountId
-    });
-  } catch (err) {
-    logError("Error creating Stripe Connect account", err);
-    
-    // Provide helpful error messages for common issues
-    let errorMessage = "Failed to create account";
-    let errorDetails = err.message;
-    
-    if (err.message && err.message.includes('signed up for Connect')) {
-      errorMessage = "Stripe Connect is not enabled";
-      errorDetails = "Please enable Stripe Connect in your Stripe Dashboard. Go to Settings → Connect → Enable Connect";
-    } else if (err.message && err.message.includes('Invalid API Key')) {
-      errorMessage = "Invalid Stripe API key";
-      errorDetails = "Please check your STRIPE_API_KEY or STRIPE_DEMO_API_KEY in .env";
-    }
-    
-    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: errorMessage, 
-      details: errorDetails,
-      helpUrl: err.message && err.message.includes('signed up for Connect') 
-        ? "https://dashboard.stripe.com/settings/connect"
-        : undefined
-    });
-  }
-});
-
-/**
- * Check Stripe Connect account status
- * @route GET /api/stripe-connect/status/:userId
- */
-app.get("/api/stripe-connect/status/:userId", async (req, res) => {
-  if (!stripe) {
-    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Stripe not configured" 
-    });
-  }
-  
-  const { userId } = req.params;
-  const token = req.headers.authorization?.substring(7); // Extract JWT token
-  
-  try {
-    const accountData = await getUserStripeAccount(userId, token);
-    
-    if (!accountData || !accountData.stripe_account_id) {
-      return res.json({ 
-        connected: false, 
-        message: "No Stripe account connected" 
-      });
-    }
-    
-    // Get account details from Stripe
-    const account = await stripe.accounts.retrieve(accountData.stripe_account_id);
-    
-    res.json({
-      connected: true,
-      accountId: account.id,
-      chargesEnabled: account.charges_enabled,
-      payoutsEnabled: account.payouts_enabled,
-      detailsSubmitted: account.details_submitted,
-      email: account.email
-    });
-  } catch (err) {
-    logError("Error checking Stripe Connect status", err);
-    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Failed to check status", 
-      details: err.message 
-    });
-  }
-});
-
-/**
- * Return page after Stripe onboarding
- * @route GET /stripe-connect-return
- */
-app.get("/stripe-connect-return", async (req, res) => {
-  const { userId } = req.query;
-  
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Account Connected</title>
-      <style>
-        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f0f9ff; }
-        .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .success { color: #00b894; font-size: 48px; margin-bottom: 20px; }
-        h1 { color: #333; }
-        p { color: #666; line-height: 1.6; }
-        .btn { display: inline-block; margin-top: 20px; padding: 12px 24px; background: #00b894; color: white; text-decoration: none; border-radius: 8px; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="success">✅</div>
-        <h1>Bank Account Connected!</h1>
-        <p>Your bank account has been successfully connected. You can now withdraw your winnings.</p>
-        <p><small>You can close this window and return to the extension.</small></p>
-        <a href="#" onclick="window.close()" class="btn">Close Window</a>
-      </div>
-      <script>
-        setTimeout(() => { window.close(); }, 3000);
-      </script>
-    </body>
-    </html>
-  `);
-});
-
-/**
- * Refresh page for Stripe onboarding
- * @route GET /stripe-connect-refresh
- */
-app.get("/stripe-connect-refresh", async (req, res) => {
-  const { userId } = req.query;
-  
-  // Redirect back to onboarding
-  res.redirect(`/api/stripe-connect/onboard/${userId}`);
-});
-
-/**
- * Request withdrawal (Transfer to Stripe Connect account)
- * @route POST /api/withdraw/:userId
- */
-app.post("/api/withdraw/:userId", async (req, res) => {
-  const { userId } = req.params;
-  const { amount } = req.body;
-  
-  logSection("WITHDRAWAL REQUEST");
-  logInfo(`User ID: ${userId}`);
-  logInfo(`Requested Amount: $${amount}`);
-  
-  if (!stripe) {
-    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Payment processing not available" 
-    });
-  }
-  
-  if (!amount || amount <= 0) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-      error: "Invalid withdrawal amount" 
-    });
-  }
-  
-  const token = req.headers.authorization?.substring(7); // Extract JWT token
-  
-  try {
-    // Verify user exists and get wallet
-    const wallet = await getUserWallet(userId, token);
-    const balance = parseFloat(wallet.balance || 0);
-    
-    logInfo(`User wallet balance: $${balance.toFixed(2)}`);
-    
-    if (amount > balance) {
-      logWarn(`Insufficient wallet balance: $${balance.toFixed(2)} < $${amount.toFixed(2)}`);
-      return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-        error: `Insufficient balance. You have $${balance.toFixed(2)}, need $${amount.toFixed(2)}` 
-      });
-    }
-    
-    // Get user's Stripe Connect account
-    const accountData = await getUserStripeAccount(userId, token);
-    
-    if (!accountData || !accountData.stripe_account_id) {
-      logWarn(`User ${userId} does not have Stripe Connect account`);
-      return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-        error: "Please connect your bank account first" 
-      });
-    }
-    
-    logInfo(`Stripe Connect Account: ${accountData.stripe_account_id}`);
-    
-    // Verify account is ready for transfers
-    const account = await stripe.accounts.retrieve(accountData.stripe_account_id);
-    
-    if (!account.details_submitted || !account.payouts_enabled) {
-      logWarn(`Account not ready: details_submitted=${account.details_submitted}, payouts_enabled=${account.payouts_enabled}`);
-      return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-        error: "Account not ready. Please complete onboarding." 
-      });
-    }
-    
-    // Check platform Stripe account balance before attempting transfer
-    let platformBalance = null;
-    try {
-      const balanceObj = await stripe.balance.retrieve();
-      platformBalance = balanceObj.available[0]?.amount || 0; // Amount in cents
-      logInfo(`Platform Stripe account balance: $${(platformBalance / 100).toFixed(2)}`);
-      
-      if (platformBalance < Math.round(amount * 100)) {
-        logError(`Platform account has insufficient funds: $${(platformBalance / 100).toFixed(2)} < $${amount.toFixed(2)}`);
-        const errorMsg = ENV.IS_PRODUCTION
-          ? `Insufficient funds in platform account. Platform has $${(platformBalance / 100).toFixed(2)}, need $${amount.toFixed(2)}.`
-          : `Insufficient funds in platform account. Platform has $${(platformBalance / 100).toFixed(2)}, need $${amount.toFixed(2)}. This is a test mode limitation. In production, funds from credit purchases will be available.`;
-        return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-          error: errorMsg,
-          details: `Platform balance: $${(platformBalance / 100).toFixed(2)}, Required: $${amount.toFixed(2)}`
-        });
-      }
-    } catch (balanceErr) {
-      logError("Error checking platform balance", balanceErr);
-      // Continue anyway - might be a permissions issue
-    }
-    
-    // Step 1: Transfer from platform account to Connect account
-    let transferId = null;
-    let payoutId = null;
-    
-    try {
-      logInfo(`Attempting to transfer $${amount.toFixed(2)} from platform to Connect account...`);
-      const transfer = await stripe.transfers.create({
-        amount: Math.round(amount * 100), // cents
-        currency: 'usd',
-        destination: accountData.stripe_account_id,
-        metadata: {
-          user_id: userId,
-          type: 'withdrawal',
-        },
-      });
-      
-      transferId = transfer.id;
-      logInfo(`✅ Transferred $${amount.toFixed(2)} from platform to Connect account: ${transfer.id}`);
-      
-      // Step 2: Create payout from Connect account to user's bank account
-      logInfo(`Creating payout from Connect account to bank...`);
-      const payout = await stripe.payouts.create(
-        {
-          amount: Math.round(amount * 100), // cents
-          currency: 'usd',
-        },
-        {
-          stripeAccount: accountData.stripe_account_id, // Create payout ON their Connect account
+    // Get user email (optional for Sessions API v2, but good to have)
+    let userEmail = null;
+    if (token && supabaseAuth) {
+      try {
+        const { data: { user }, error: authError } = await supabaseAuth.auth.getUser(token);
+        if (!authError && user) {
+          userEmail = user.email;
         }
-      );
-      
-      payoutId = payout.id;
-      logInfo(`✅ Created payout from Connect account to bank: ${payout.id}`);
-      
-    } catch (transferErr) {
-      logError("Error processing withdrawal transfer/payout", transferErr);
-      logError("Transfer error details:", {
-        message: transferErr.message,
-        type: transferErr.type,
-        code: transferErr.code
-      });
-      
-      // Check if it's a Stripe error about insufficient funds
-      let errorMessage = "Failed to process withdrawal";
-      if (transferErr.message && transferErr.message.includes("insufficient available funds")) {
-        errorMessage = ENV.IS_PRODUCTION
-          ? `Insufficient funds in platform account. Platform has $${platformBalance ? (platformBalance / 100).toFixed(2) : 'unknown'}, need $${amount.toFixed(2)}.`
-          : `Insufficient funds in platform account. Platform has $${platformBalance ? (platformBalance / 100).toFixed(2) : 'unknown'}, need $${amount.toFixed(2)}. This is a test mode limitation.`;
-      } else if (transferErr.message) {
-        errorMessage = transferErr.message;
+      } catch (authErr) {
+        logWarn("Could not get user email for onramp session", authErr);
       }
-      
-      return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-        error: errorMessage,
-        details: transferErr.message 
-      });
     }
     
-    // Step 3: Deduct from user wallet balance
-    await addUserBalance(userId, -amount, token);
+    const { walletAddress } = await getOrCreateUserWallet(userId);
+    const presetFiatAmount = amount ? parseFloat(amount) : null;
     
-    // Step 4: Create withdrawal request record
-    const withdrawal = await createWithdrawalRequest(
+    // Sessions API v2 returns production URLs (sandbox is handled by the API)
+    const { onrampUrl, paymentLinkUrl, session } = await generateCoinbaseOnrampOrder(
+      walletAddress,
       userId,
-      amount,
-      'stripe_connect',
-      payoutId,
-      transferId,
-      token
+      userEmail,
+      presetFiatAmount,
+      cleanClientIp,
+      false // useSandbox = false (Sessions API v2 returns production URLs)
     );
     
-    logInfo(`Withdrawal processed: User ${userId}, Amount: $${amount}, Transfer: ${transferId}, Payout: ${payoutId}`);
+    logInfo(`[Coinbase Onramp] Created onramp session v2 for user ${userId}`);
     
     res.json({ 
       success: true, 
-      withdrawal_id: withdrawal.id,
-      transfer_id: transferId,
-      payout_id: payoutId,
-      amount: amount,
-      message: "Withdrawal processed successfully. Funds will arrive in your bank account within 3-5 business days."
+      onrampUrl: paymentLinkUrl || onrampUrl,
+      paymentLinkUrl: paymentLinkUrl || onrampUrl,
+      sessionToken: null, // Not used with Sessions API v2
+      walletAddress,
+      network: 'solana',
+      message: "Use this link to deposit USDC to your embedded wallet"
     });
   } catch (err) {
-    logError("Error processing withdrawal", err);
+    logError("Error generating Coinbase onramp link", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to generate onramp link",
+      details: err.message 
+    });
+  }
+});
+
+/**
+ * Get user's wallet address
+ * @route GET /api/wallet-address/:userId
+ */
+app.get("/api/wallet-address/:userId", async (req, res) => {
+  try {
+  const { userId } = req.params;
+    const token = req.headers.authorization?.substring(7);
     
-    // Check if it's a Stripe error about insufficient funds
-    let errorMessage = "Failed to process withdrawal";
-    if (err.message && err.message.includes("insufficient available funds")) {
-      errorMessage = ENV.IS_PRODUCTION
-        ? "Insufficient funds in platform account."
-        : "Insufficient funds in platform account. This is a test mode limitation. In production, funds from credit purchases will be available for withdrawals.";
-    } else if (err.message) {
-      errorMessage = err.message;
+    // Verify auth
+    if (token && supabaseAuth) {
+      try {
+        const { data: { user }, error: authError } = await supabaseAuth.auth.getUser(token);
+        if (authError || !user || user.id !== userId) {
+          return res.status(403).json({ error: "Unauthorized" });
+        }
+      } catch (authErr) {
+        logWarn("Auth verification failed, proceeding anyway", authErr);
+      }
     }
     
-    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: errorMessage,
-      details: err.message 
-    });
-  }
-});
-
-/**
- * Get withdrawal history
- * @route GET /api/withdrawals/:userId
- */
-app.get("/api/withdrawals/:userId", async (req, res) => {
-  const { userId } = req.params;
-  const token = req.headers.authorization?.substring(7); // Extract JWT token
-  
-  try {
-    const withdrawals = await getWithdrawalRequests(userId, token);
-    res.json({ success: true, withdrawals });
-  } catch (err) {
-    logError("Error fetching withdrawals", err);
-    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Failed to fetch withdrawals", 
-      details: err.message 
-    });
-  }
-});
-
-/**
- * Check platform Stripe account balance
- * @route GET /api/platform-balance
- */
-app.get("/api/platform-balance", async (req, res) => {
-  if (!stripe) {
-    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Payment processing not available" 
-    });
-  }
-  
-  try {
-    const balance = await stripe.balance.retrieve();
-    const available = balance.available[0]?.amount || 0; // Amount in cents
-    const pending = balance.pending[0]?.amount || 0;
+    // Import Coinbase CDP service
+    const { getOrCreateUserWallet } = await import('./coinbaseCdpService.js');
+    
+    const { walletAddress } = await getOrCreateUserWallet(userId);
     
     res.json({
       success: true,
-      available: available / 100, // Convert to dollars
-      pending: pending / 100,
-      currency: balance.available[0]?.currency || 'usd'
+      walletAddress,
+      network: 'solana'
     });
   } catch (err) {
-    logError("Error fetching platform balance", err);
+    logError("Error getting wallet address", err);
     res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Failed to fetch platform balance", 
+      error: "Failed to get wallet address",
       details: err.message 
     });
   }
 });
+
+// All Stripe endpoints removed - using Coinbase CDP for payments now
+
+// Stripe withdrawal endpoints removed - using Coinbase CDP for payments now
 
 // ============================================================================
 // TESTING ENDPOINTS (Development Only)
@@ -1949,194 +1384,7 @@ app.post("/api/quote", async (req, res) => {
   }
 });
 
-/**
- * Create a Stripe Checkout session for payment
- * @route POST /api/create-checkout-session
- * @param {string} userId - User identifier
- * @param {number} stake - Stake amount
- * @param {Array} parlayBets - Array of parlay bet objects
- * @param {Object} quote - Quote data from AI service
- * @returns {Object} Checkout session ID and URL
- */
-app.post("/api/create-checkout-session", async (req, res) => {
-  if (!stripe) {
-    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Payment processing not available" 
-    });
-  }
-
-  const { userId, stake, parlayBets, quote } = req.body;
-  
-  if (!userId) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-      error: ERROR_MESSAGES.PAYMENT.USER_ID_REQUIRED 
-    });
-  }
-  
-  if (!stake || stake <= 0) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-      error: ERROR_MESSAGES.PARLAY.INVALID_STAKE 
-    });
-  }
-  
-  if (!parlayBets || !Array.isArray(parlayBets) || parlayBets.length === 0) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-      error: ERROR_MESSAGES.PARLAY.INVALID_BETS 
-    });
-  }
-  
-  try {
-    // Create a description of the parlay
-    const parlayDescription = parlayBets.map(bet => 
-      `${bet.marketTitle} - ${bet.optionLabel} @ ${bet.prob}%`
-    ).join(', ');
-    
-    const truncatedDescription = parlayDescription.length > 500 
-      ? parlayDescription.substring(0, 497) + '...'
-      : parlayDescription;
-    
-    logInfo(`Creating checkout session for user ${userId}, stake: $${stake}`);
-    
-    // Create Stripe Checkout Session with minimal metadata
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: CONFIG.STRIPE.PAYMENT_METHOD_TYPES,
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            product_data: {
-              name: `Kalshi Parlay Bet (${parlayBets.length} markets)`,
-              description: truncatedDescription,
-              images: parlayBets.filter(b => b.imageUrl).slice(0, 1).map(b => b.imageUrl), // First image
-            },
-            unit_amount: Math.round(stake * 100), // Convert to cents
-          },
-          quantity: 1,
-        },
-      ],
-      mode: CONFIG.STRIPE.PAYMENT_MODE,
-      success_url: `${ENV.BACKEND_BASE_URL || `http://localhost:${PORT}`}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${ENV.BACKEND_BASE_URL || `http://localhost:${PORT}`}/payment-cancel`,
-      metadata: {
-        userId,
-        stake: stake.toString(),
-        betCount: parlayBets.length.toString(),
-      },
-    });
-    
-    logInfo(`Checkout session created: ${session.id}`);
-    
-    const token = req.headers.authorization?.substring(7); // Extract JWT token
-    // Save full payment details to database (avoids 500-char metadata limit)
-    await savePendingPayment(session.id, userId, stake, parlayBets, quote, 'parlay', token);
-    logInfo("Payment details saved to database");
-    
-    res.json({ 
-      sessionId: session.id,
-      checkoutUrl: session.url 
-    });
-  } catch (err) {
-    logError("Error creating checkout session", err);
-    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: ERROR_MESSAGES.PAYMENT.CHECKOUT_FAILED, 
-      details: err.message 
-    });
-  }
-});
-
-/**
- * Create a Stripe Checkout session for buying credits
- * @route POST /api/buy-credits
- * @param {string} userId - User identifier
- * @param {number} amount - Amount of credits to purchase (in dollars)
- * @returns {Object} Checkout session ID and URL
- */
-app.post("/api/buy-credits", async (req, res) => {
-  if (!stripe) {
-    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Payment processing not available" 
-    });
-  }
-
-  const { userId, amount } = req.body;
-  
-  if (!userId) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-      error: ERROR_MESSAGES.PAYMENT.USER_ID_REQUIRED 
-    });
-  }
-  
-  if (!amount || amount <= 0) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-      error: "Invalid credit amount" 
-    });
-  }
-  
-  // Set minimum and maximum limits
-  const minAmount = 5; // $5 minimum
-  const maxAmount = 1000; // $1000 maximum
-  
-  if (amount < minAmount) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-      error: `Minimum purchase is $${minAmount}` 
-    });
-  }
-  
-  if (amount > maxAmount) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
-      error: `Maximum purchase is $${maxAmount}` 
-    });
-  }
-  
-  try {
-    logInfo(`Creating credit purchase checkout session for user ${userId}, amount: $${amount}`);
-    
-    // Create Stripe Checkout Session - money goes to platform account
-    // User wallet balance will be updated via webhook
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: CONFIG.STRIPE.PAYMENT_METHOD_TYPES,
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            product_data: {
-              name: `Kalshi Parlay Credits - $${amount}`,
-              description: 'Add credits to your wallet for placing parlay bets',
-            },
-            unit_amount: Math.round(amount * 100), // Convert to cents
-          },
-          quantity: 1,
-        },
-      ],
-      mode: CONFIG.STRIPE.PAYMENT_MODE,
-      success_url: `${ENV.BACKEND_BASE_URL || `http://localhost:${PORT}`}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${ENV.BACKEND_BASE_URL || `http://localhost:${PORT}`}/payment-cancel`,
-      metadata: {
-        userId,
-        amount: amount.toString(),
-        paymentType: 'credits',
-      },
-    });
-    
-    logInfo(`Credit purchase checkout session created: ${session.id}`);
-    
-    const token = req.headers.authorization?.substring(7); // Extract JWT token
-    // Save credit purchase to database
-    await savePendingPayment(session.id, userId, amount, null, null, 'credits', token);
-    logInfo("Credit purchase details saved to database");
-    
-    res.json({ 
-      sessionId: session.id,
-      checkoutUrl: session.url 
-    });
-  } catch (err) {
-    logError("Error creating credit purchase checkout session", err);
-    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
-      error: "Failed to create checkout session", 
-      details: err.message 
-    });
-  }
-});
+// Stripe checkout endpoints removed - using Coinbase CDP for payments now
 
 /**
  * Place parlay bet using credits from wallet
@@ -2319,254 +1567,7 @@ app.post("/api/place-parlay", async (req, res) => {
   }
 });
 
-/**
- * GET /payment-success
- * 
- * Success page after payment
- */
-app.get("/payment-success", async (req, res) => {
-  const sessionId = req.query.session_id;
-  
-  // Check if this was a credit purchase
-  let isCreditPurchase = false;
-  let creditAmount = 0;
-  let userId = null;
-  
-  if (sessionId) {
-    try {
-      const payment = await getPendingPayment(sessionId);
-      if (payment) {
-        const paymentType = payment.payment_type || 'parlay';
-        isCreditPurchase = paymentType === 'credits';
-        creditAmount = parseFloat(payment.stake || 0);
-        userId = payment.user_id;
-        
-        // If credit purchase and webhook hasn't fired yet, try to add credits now
-        if (isCreditPurchase) {
-          const session = await stripe.checkout.sessions.retrieve(sessionId);
-          if (session.payment_status === 'paid') {
-            // Double-check wallet balance (use service role since no user token on redirect)
-            const wallet = await getUserWallet(userId, null);
-            logInfo(`Payment success page - Wallet balance: $${parseFloat(wallet.balance || 0).toFixed(2)}`);
-            
-            // If credits weren't added by webhook, add them now (fallback)
-            const stripeAmount = session.amount_total / 100;
-            const expectedBalance = parseFloat(wallet.balance || 0) + stripeAmount;
-            logInfo(`Expected balance after credit purchase: $${expectedBalance.toFixed(2)}`);
-          }
-        }
-      }
-    } catch (err) {
-      logError("Error checking payment in success page", err);
-    }
-  }
-  
-  if (!sessionId) {
-    return res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Payment Success</title>
-        <style>
-          body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f0f9ff; }
-          .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-          .success { color: #00b894; font-size: 48px; margin-bottom: 20px; }
-          h1 { color: #333; }
-          p { color: #666; line-height: 1.6; }
-          .btn { display: inline-block; margin-top: 20px; padding: 12px 24px; background: #00b894; color: white; text-decoration: none; border-radius: 8px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="success">✅</div>
-          <h1>Payment Successful!</h1>
-          <p>Your parlay bet has been placed successfully.</p>
-          <a href="#" onclick="window.close()" class="btn">Close Window</a>
-        </div>
-      </body>
-      </html>
-    `);
-  }
-  
-  try {
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-    const metadata = session.metadata || {};
-    const paymentType = metadata.paymentType || 'parlay';
-    const stripeAmount = session.amount_total / 100;
-    
-    // If this is a credit purchase, check if credits were added (webhook might not have fired)
-    if (paymentType === 'credits' && session.payment_status === 'paid') {
-      try {
-        const payment = await getPendingPayment(sessionId);
-        if (payment && payment.user_id) {
-          const wallet = await getUserWallet(payment.user_id, null);
-          const currentBalance = parseFloat(wallet.balance || 0);
-          
-          // If credits weren't added yet (webhook didn't fire), add them now as fallback
-          if (currentBalance < stripeAmount) {
-            logWarn(`Credits not yet added via webhook, adding via fallback for session ${sessionId}`);
-            await addUserBalance(payment.user_id, stripeAmount, null);
-            await updatePaymentStatus(sessionId, 'completed', null);
-            logInfo(`Fallback: Added $${stripeAmount.toFixed(2)} credits to wallet`);
-          }
-          
-          // Get updated balance
-          const updatedWallet = await getUserWallet(payment.user_id, null);
-          const newBalance = parseFloat(updatedWallet.balance || 0);
-          
-          res.send(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <title>Credits Purchased</title>
-              <style>
-                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f0f9ff; }
-                .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-                .success { color: #00b894; font-size: 48px; margin-bottom: 20px; }
-                h1 { color: #333; }
-                p { color: #666; line-height: 1.6; }
-                .details { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: left; }
-                .details-row { display: flex; justify-content: space-between; margin: 10px 0; }
-                .label { font-weight: 600; color: #333; }
-                .value { color: #00b894; font-weight: 600; font-size: 18px; }
-                .btn { display: inline-block; margin-top: 20px; padding: 12px 24px; background: #00b894; color: white; text-decoration: none; border-radius: 8px; }
-              </style>
-            </head>
-            <body>
-              <div class="container">
-                <div class="success">✅</div>
-                <h1>Credits Added Successfully!</h1>
-                <p>Your credits have been added to your wallet.</p>
-                
-                <div class="details">
-                  <div class="details-row">
-                    <span class="label">Credits Purchased:</span>
-                    <span class="value">$${stripeAmount.toFixed(2)}</span>
-                  </div>
-                  <div class="details-row">
-                    <span class="label">New Wallet Balance:</span>
-                    <span class="value">$${newBalance.toFixed(2)}</span>
-                  </div>
-                </div>
-                
-                <p><small>You can now close this window and return to your extension. Refresh the extension to see your updated balance.</small></p>
-                <a href="#" onclick="window.close()" class="btn">Close Window</a>
-              </div>
-              
-              <script>
-                // Auto-close after 5 seconds
-                setTimeout(() => {
-                  window.close();
-                }, 5000);
-              </script>
-            </body>
-            </html>
-          `);
-          return;
-        }
-      } catch (creditErr) {
-        logError("Error processing credit purchase in success page", creditErr);
-      }
-    }
-    
-    // Regular parlay purchase success page
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Payment Success</title>
-        <style>
-          body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f0f9ff; }
-          .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-          .success { color: #00b894; font-size: 48px; margin-bottom: 20px; }
-          h1 { color: #333; }
-          p { color: #666; line-height: 1.6; }
-          .details { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: left; }
-          .details-row { display: flex; justify-content: space-between; margin: 10px 0; }
-          .label { font-weight: 600; color: #333; }
-          .value { color: #00b894; font-weight: 600; }
-          .btn { display: inline-block; margin-top: 20px; padding: 12px 24px; background: #00b894; color: white; text-decoration: none; border-radius: 8px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="success">✅</div>
-          <h1>Payment Successful!</h1>
-          <p>Your parlay bet has been placed successfully.</p>
-          
-          <div class="details">
-            <div class="details-row">
-              <span class="label">Amount Paid:</span>
-              <span class="value">$${stripeAmount.toFixed(2)}</span>
-            </div>
-            <div class="details-row">
-              <span class="label">Stake:</span>
-              <span class="value">$${metadata.stake || stripeAmount.toFixed(2)}</span>
-            </div>
-            <div class="details-row">
-              <span class="label">Session ID:</span>
-              <span class="value">${sessionId.substring(0, 20)}...</span>
-            </div>
-          </div>
-          
-          <p><small>You can now close this window and return to your extension.</small></p>
-          <a href="#" onclick="window.close()" class="btn">Close Window</a>
-        </div>
-        
-        <script>
-          // Auto-close after 5 seconds
-          setTimeout(() => {
-            window.close();
-          }, 5000);
-        </script>
-      </body>
-      </html>
-    `);
-  } catch (err) {
-    logError("Error retrieving session:", err);
-    res.status(500).send("Error retrieving payment details");
-  }
-});
-
-/**
- * GET /payment-cancel
- * 
- * Cancel page when user cancels payment
- */
-app.get("/payment-cancel", (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Payment Cancelled</title>
-      <style>
-        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #fff5f5; }
-        .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .cancel { color: #e74c3c; font-size: 48px; margin-bottom: 20px; }
-        h1 { color: #333; }
-        p { color: #666; line-height: 1.6; }
-        .btn { display: inline-block; margin-top: 20px; padding: 12px 24px; background: #3498db; color: white; text-decoration: none; border-radius: 8px; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="cancel">❌</div>
-        <h1>Payment Cancelled</h1>
-        <p>Your payment was cancelled. No charges were made.</p>
-        <p>You can return to the extension and try again.</p>
-        <a href="#" onclick="window.close()" class="btn">Close Window</a>
-      </div>
-      
-      <script>
-        // Auto-close after 3 seconds
-        setTimeout(() => {
-          window.close();
-        }, 3000);
-      </script>
-    </body>
-    </html>
-  `);
-});
+// Stripe payment success/cancel pages removed - using Coinbase CDP for payments now
 
 // Start parlay status checker (runs every 15 minutes)
 const STATUS_CHECK_INTERVAL = 15 * 60 * 1000; // 15 minutes

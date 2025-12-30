@@ -16,61 +16,23 @@ let supabase = null;
 // Load backend URL and Supabase config from backend
 async function loadBackendConfig() {
   try {
-    // Try to get backend URL from storage first (user might have set it)
-    const stored = await chrome.storage.sync.get('backendUrl');
-    if (stored.backendUrl) {
-      BACKEND_BASE_URL = stored.backendUrl;
-      console.log(`[Config] Using stored backend URL: ${BACKEND_BASE_URL}`);
-    }
+    // FORCE localhost for development
+    BACKEND_BASE_URL = "http://localhost:4000";
+    console.log(`[Config] Using localhost: ${BACKEND_BASE_URL}`);
     
-    // Try production URLs first (more reliable than localhost)
-    const productionUrls = [
-      'https://kalshiparlay-production.up.railway.app',
-      'https://kalshi-parlay-production.up.railway.app',
-      'https://kalshi-parlay.railway.app',
-    ];
+    // Clear any stored Railway URL
+    await chrome.storage.sync.remove('backendUrl');
     
-    let res = null;
-    let lastError = null;
-    
-    // Try production URLs first
-    for (const url of productionUrls) {
-      try {
-        console.log(`[Config] Trying backend URL: ${url}`);
-        const prodRes = await fetch(`${url}/api/config`, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json'
-          }
-        });
-        if (prodRes.ok) {
-          BACKEND_BASE_URL = url;
-          await chrome.storage.sync.set({ backendUrl: url });
-          console.log(`[Config] ✅ Found production backend: ${BACKEND_BASE_URL}`);
-          res = prodRes;
-          break;
-        } else {
-          console.warn(`[Config] ❌ ${url} returned status ${prodRes.status}`);
-        }
-      } catch (e) {
-        console.warn(`[Config] ❌ Failed to connect to ${url}:`, e.message);
-        lastError = e;
-        continue;
+    // Try localhost directly
+    const res = await fetch(`${BACKEND_BASE_URL}/api/config`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json'
       }
-    }
+    });
     
-    // If production URLs failed, try localhost (for local dev)
-    if (!res) {
-      console.log(`[Config] Trying localhost fallback: ${BACKEND_BASE_URL}`);
-      try {
-        res = await fetch(`${BACKEND_BASE_URL}/api/config`);
-        if (!res.ok) {
-          throw new Error(`Failed to load config: ${res.status}`);
-        }
-      } catch (e) {
-        console.error(`[Config] ❌ Localhost also failed:`, e.message);
-        throw new Error(`Failed to connect to any backend. Last error: ${lastError?.message || e.message}`);
-      }
+    if (!res.ok) {
+      throw new Error(`Failed to load config: ${res.status}`);
     }
     
     const backendConfig = await res.json();
@@ -83,12 +45,8 @@ async function loadBackendConfig() {
     SUPABASE_URL = backendConfig.supabaseUrl;
     SUPABASE_ANON_KEY = backendConfig.supabaseAnonKey;
     
-    // Update backend URL from config if provided
-    if (backendConfig.backendUrl && backendConfig.backendUrl !== BACKEND_BASE_URL) {
-      BACKEND_BASE_URL = backendConfig.backendUrl;
-      await chrome.storage.sync.set({ backendUrl: backendConfig.backendUrl });
-      console.log(`[Config] Updated backend URL from config: ${BACKEND_BASE_URL}`);
-    }
+    // Don't update BACKEND_BASE_URL from config - keep localhost
+    // The backend config might return a Railway URL, but we want to stay on localhost
     
     if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
       console.error('[Config] ❌ Supabase credentials missing from backend config');
@@ -1694,18 +1652,18 @@ function setupAuthUI() {
       }
       
       try {
-        // Update email in profile overlay
-        const user = await getCurrentUser();
-        if (user && profileEmail) {
-          profileEmail.textContent = user.email || 'Not available';
-        }
-        // Load wallet balance for profile display
-        await loadWalletBalance();
-        // Show main profile view
-        showProfileMainView();
+      // Update email in profile overlay
+      const user = await getCurrentUser();
+      if (user && profileEmail) {
+        profileEmail.textContent = user.email || 'Not available';
+      }
+      // Load wallet balance for profile display
+      await loadWalletBalance();
+      // Show main profile view
+      showProfileMainView();
       } finally {
         // Hide loading after data is loaded
-        if (profileOverlay) {
+      if (profileOverlay) {
           const modalBody = profileOverlay.querySelector('.bet-modal-body');
           hideLoading(modalBody);
         }
@@ -2049,8 +2007,7 @@ async function init() {
     // Load wallet balance
   await loadWalletBalance();
   
-  // Check Stripe Connect status
-  await checkStripeConnectStatus();
+  // Stripe Connect removed - using Coinbase CDP for payments now
   } catch (err) {
     console.error('Error in init function:', err);
     // Ensure login overlay is visible on error
@@ -2157,24 +2114,7 @@ function setupEventListeners() {
     profileRefreshWalletBtn.hasListener = true;
   }
   
-  // Connect bank account button (main and profile)
-  const connectBankBtn = document.getElementById("connect-bank-btn");
-  if (connectBankBtn && !connectBankBtn.hasListener) {
-    connectBankBtn.addEventListener("click", connectBankAccount);
-    connectBankBtn.hasListener = true;
-  }
-  
-  const profileConnectBankBtn = document.getElementById("profile-connect-bank-btn");
-  if (profileConnectBankBtn && !profileConnectBankBtn.hasListener) {
-    profileConnectBankBtn.addEventListener("click", connectBankAccount);
-    profileConnectBankBtn.hasListener = true;
-  }
-
-  const modalConnectBankBtn = document.getElementById("modal-connect-bank-btn");
-  if (modalConnectBankBtn && !modalConnectBankBtn.hasListener) {
-    modalConnectBankBtn.addEventListener("click", connectBankAccount);
-    modalConnectBankBtn.hasListener = true;
-  }
+  // Stripe Connect buttons removed - using Coinbase CDP for payments now
   
   // Withdraw button
   // Withdraw button (main and profile)
@@ -2241,12 +2181,7 @@ function setupEventListeners() {
     profileConfirmWithdrawBtn.hasListener = true;
   }
   
-  // Profile modal connect bank button
-  const profileModalConnectBankBtn = document.getElementById("profile-modal-connect-bank-btn");
-  if (profileModalConnectBankBtn && !profileModalConnectBankBtn.hasListener) {
-    profileModalConnectBankBtn.addEventListener("click", connectBankAccount);
-    profileModalConnectBankBtn.hasListener = true;
-  }
+  // Stripe Connect button removed - using Coinbase CDP for payments now
   
   // Close withdraw overlay button
   const closeWithdrawBtn = document.getElementById("close-withdraw-btn");
@@ -2291,6 +2226,15 @@ function setupEventListeners() {
   if (buyCreditsBtn && !buyCreditsBtn.hasListener) {
     buyCreditsBtn.addEventListener("click", showBuyCreditsOverlay);
     buyCreditsBtn.hasListener = true;
+  }
+  
+  // Top Up Account button (profile) - directly opens Coinbase onramp
+  const profileTopUpBtn = document.getElementById("profile-top-up-btn");
+  if (profileTopUpBtn && !profileTopUpBtn.hasListener) {
+    profileTopUpBtn.addEventListener("click", async () => {
+      await handleTopUpAccount();
+    });
+    profileTopUpBtn.hasListener = true;
   }
   
   const profileBuyCreditsBtn = document.getElementById("profile-buy-credits-btn");
@@ -2703,63 +2647,7 @@ async function claimWinnings(sessionId, amount) {
   }
 }
 
-async function checkStripeConnectStatus() {
-  try {
-    const uid = await getUserId(currentEnvironment);
-    const res = await authenticatedFetch(`${BACKEND_BASE_URL}/api/stripe-connect/status/${uid}`);
-    
-    if (res.ok) {
-      const data = await res.json();
-      const connectBtn = document.getElementById("connect-bank-btn");
-      const profileConnectBtn = document.getElementById("profile-connect-bank-btn");
-      const withdrawBtn = document.getElementById("withdraw-btn");
-      const profileWithdrawBtn = document.getElementById("profile-withdraw-btn");
-      const connectBankMessage = document.getElementById("connect-bank-message");
-      const profileConnectBankMessage = document.getElementById("profile-connect-bank-message");
-      
-      if (data.connected && data.payoutsEnabled) {
-        // Account is connected and ready
-        if (connectBtn) connectBtn.style.display = "none";
-        if (profileConnectBtn) profileConnectBtn.style.display = "none";
-        if (withdrawBtn) withdrawBtn.disabled = false;
-        if (profileWithdrawBtn) profileWithdrawBtn.disabled = false;
-        if (connectBankMessage) connectBankMessage.style.display = "none";
-        if (profileConnectBankMessage) profileConnectBankMessage.style.display = "none";
-        return true;
-      } else {
-        // Need to connect account
-        if (connectBtn) connectBtn.style.display = "block";
-        if (profileConnectBtn) profileConnectBtn.style.display = "block";
-        if (withdrawBtn) withdrawBtn.disabled = true;
-        if (profileWithdrawBtn) profileWithdrawBtn.disabled = true;
-        if (connectBankMessage) connectBankMessage.style.display = "block";
-        if (profileConnectBankMessage) profileConnectBankMessage.style.display = "block";
-        return false;
-      }
-    }
-  } catch (err) {
-    console.error("Failed to check Stripe Connect status:", err);
-    return false;
-  }
-}
-
-async function connectBankAccount() {
-  try {
-    const uid = await getUserId(currentEnvironment);
-    const res = await authenticatedFetch(`${BACKEND_BASE_URL}/api/stripe-connect/onboard/${uid}`);
-    
-    if (res.ok) {
-      const data = await res.json();
-      // Open Stripe onboarding in new tab
-      chrome.tabs.create({ url: data.url });
-    } else {
-      showNotification("Failed to start bank account connection", 'error');
-    }
-  } catch (err) {
-    console.error("Failed to connect bank account:", err);
-    showNotification("Failed to connect bank account", 'error');
-  }
-}
+// Stripe Connect functions removed - using Coinbase CDP for payments now
 
 async function loadWalletBalance() {
   try {
@@ -2800,30 +2688,28 @@ async function loadWalletBalance() {
         buyCreditsBalanceDisplay.textContent = `$${balance.toFixed(2)}`;
       }
       
-      // Check Stripe Connect status
-      await checkStripeConnectStatus();
+      // Log wallet address if available (for debugging)
+      if (data.crypto_wallet_address) {
+        console.log(`[Wallet] Balance: $${balance.toFixed(2)}, Address: ${data.crypto_wallet_address}`);
+      }
+      
+      // Log wallet address if available (for debugging)
+      if (data.crypto_wallet_address) {
+        console.log(`[Wallet] Balance: $${balance.toFixed(2)}, Address: ${data.crypto_wallet_address}`);
+      }
       
       // Enable/disable withdraw button based on balance (profile and main)
       const profileWithdrawBtn = document.getElementById("profile-withdraw-btn");
       const withdrawBtn = document.getElementById("withdraw-btn");
-      const isConnected = await checkStripeConnectStatus();
       
       if (profileWithdrawBtn) {
-        profileWithdrawBtn.disabled = balance <= 0 || !isConnected;
+        profileWithdrawBtn.disabled = balance <= 0;
       }
       if (withdrawBtn) {
-        withdrawBtn.disabled = balance <= 0 || !isConnected;
+        withdrawBtn.disabled = balance <= 0;
       }
       
-      // Update connect bank button visibility
-      const profileConnectBtn = document.getElementById("profile-connect-bank-btn");
-      const connectBtn = document.getElementById("connect-bank-btn");
-      if (profileConnectBtn) {
-        profileConnectBtn.style.display = isConnected ? "none" : "block";
-      }
-      if (connectBtn) {
-        connectBtn.style.display = isConnected ? "none" : "block";
-      }
+      // Stripe Connect button visibility removed - using Coinbase CDP for payments now
       
       return balance;
     }
@@ -2831,6 +2717,59 @@ async function loadWalletBalance() {
     console.error("Failed to load wallet balance:", err);
     return 0;
   }
+}
+
+/**
+ * Refresh wallet balance (alias for loadWalletBalance)
+ * Used for manual refresh and automatic polling
+ */
+async function refreshWalletBalance() {
+  return loadWalletBalance();
+}
+
+// Set up automatic balance polling every 30 seconds
+// This ensures balance updates when users deposit via Coinbase onramp
+let balancePollInterval = null;
+
+function startBalancePolling() {
+  // Clear existing interval if any
+  if (balancePollInterval) {
+    clearInterval(balancePollInterval);
+  }
+  
+  // Poll every 30 seconds
+  balancePollInterval = setInterval(async () => {
+    try {
+      const uid = await getUserId(currentEnvironment);
+      if (uid) {
+        await refreshWalletBalance();
+      }
+    } catch (err) {
+      console.warn('[Balance Polling] Failed to refresh balance:', err);
+    }
+  }, 30000); // 30 seconds
+  
+  console.log('[Balance Polling] Started automatic balance refresh (every 30s)');
+}
+
+function stopBalancePolling() {
+  if (balancePollInterval) {
+    clearInterval(balancePollInterval);
+    balancePollInterval = null;
+    console.log('[Balance Polling] Stopped automatic balance refresh');
+  }
+}
+
+// Start polling when user is logged in
+// Check auth state and start polling
+if (typeof supabase !== 'undefined' && supabase) {
+  supabase.auth.onAuthStateChange((event, session) => {
+    if (event === 'SIGNED_IN' && session) {
+      startBalancePolling();
+    } else if (event === 'SIGNED_OUT') {
+      stopBalancePolling();
+    }
+  });
 }
 
 // Profile overlay view management
@@ -2910,9 +2849,8 @@ function showProfileWithdrawView() {
   if (profileBackBtn) profileBackBtn.style.display = "block";
   if (profileHeaderTitle) profileHeaderTitle.textContent = "Withdraw Funds";
   
-  // Load wallet balance and check Stripe Connect status
+  // Load wallet balance
   loadWalletBalance();
-  checkStripeConnectStatus();
   
   // Reset amount input
   const amountInput = document.getElementById("profile-withdraw-amount-input");
@@ -3106,7 +3044,6 @@ function showWithdrawOverlay() {
   if (!overlay) return;
   
   loadWalletBalance();
-  checkStripeConnectStatus();
   
   // Reset amount input
   const amountInput = document.getElementById("withdraw-amount-input");
@@ -3165,27 +3102,7 @@ async function handleWithdraw() {
     // Log user ID for debugging
     console.log(`[Withdraw] User ID: ${uid}`);
     
-    // Check if Stripe Connect is set up
-    try {
-      const connectStatusRes = await authenticatedFetch(`${BACKEND_BASE_URL}/api/stripe-connect/status/${uid}`);
-      if (connectStatusRes.ok) {
-        const connectData = await connectStatusRes.json();
-        console.log(`[Withdraw] Connect status:`, connectData);
-        if (!connectData.connected || !connectData.payoutsEnabled) {
-          if (errorMessage) {
-            errorMessage.textContent = "Please connect your bank account first. Click 'Connect Bank Account' to set it up.";
-            errorMessage.classList.remove("hidden");
-          }
-          return;
-        }
-      } else {
-        // If we can't check status, still try to proceed (backend will handle it)
-        console.warn("Could not check Stripe Connect status, proceeding anyway");
-      }
-    } catch (statusErr) {
-      console.error("Error checking Stripe Connect status:", statusErr);
-      // Continue anyway - backend will handle validation
-    }
+    // Stripe Connect check removed - using Coinbase CDP for payments now
     
     // Check platform balance (optional - for better error messages)
     try {
@@ -3220,7 +3137,7 @@ async function handleWithdraw() {
     
     if (!res.ok) {
       const error = await res.json().catch(() => ({}));
-      // Show the actual error message from Stripe
+      // Show the actual error message
       const errorMsg = error.error || error.details || `Failed to process withdrawal (${res.status})`;
       if (errorMessage) {
         errorMessage.textContent = `❌ ${errorMsg}`;
@@ -3290,6 +3207,46 @@ function closeBuyCreditsOverlay() {
 }
 
 // Profile-specific handlers
+async function handleTopUpAccount() {
+  try {
+    const uid = await getUserId(currentEnvironment);
+    
+    console.log("[Top Up] Getting Coinbase onramp link...");
+    
+    // Get Coinbase onramp link without preset amount
+    const url = `${BACKEND_BASE_URL}/api/coinbase-onramp/${uid}`;
+    const res = await authenticatedFetch(url, {
+      method: 'GET'
+    });
+    
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.error || error.details || `Failed to get onramp link: ${res.status}`);
+    }
+    
+    const { onrampUrl, walletAddress } = await res.json();
+    
+    console.log("[Top Up] Opening Coinbase Onramp:", onrampUrl);
+    console.log("[Top Up] Wallet address:", walletAddress);
+    
+    // Show wallet address and instructions
+    const message = `Your wallet address: ${walletAddress}\n\nOpening Coinbase onramp. Your balance will update automatically once the transaction confirms on Solana (usually takes 1-2 minutes).`;
+    alert(message);
+    
+    // Open Coinbase onramp in new tab
+    chrome.tabs.create({ url: onrampUrl });
+    
+    // Refresh balance after a delay (to catch the deposit)
+    setTimeout(() => {
+      refreshWalletBalance();
+    }, 60000); // Refresh after 1 minute
+    
+  } catch (err) {
+    console.error("[Top Up] Failed to get onramp link:", err);
+    showNotification(`Failed to open deposit page: ${err.message}`, 'error');
+  }
+}
+
 async function handleProfileBuyCredits() {
   const amountInput = document.getElementById("profile-buy-credits-amount-input");
   const amount = parseFloat(amountInput?.value) || 0;
@@ -3301,17 +3258,11 @@ async function handleProfileBuyCredits() {
     errorMessage.classList.add("hidden");
   }
   
-  if (amount < 5) {
+  // Note: Amount validation removed - Coinbase onramp handles this
+  // But we can still validate for UX
+  if (amount > 0 && amount < 1) {
     if (errorMessage) {
-      errorMessage.textContent = "Minimum purchase is $5";
-      errorMessage.classList.remove("hidden");
-    }
-    return;
-  }
-  
-  if (amount > 1000) {
-    if (errorMessage) {
-      errorMessage.textContent = "Maximum purchase is $1,000";
+      errorMessage.textContent = "Minimum purchase is $1";
       errorMessage.classList.remove("hidden");
     }
     return;
@@ -3323,42 +3274,49 @@ async function handleProfileBuyCredits() {
     // Disable button
     if (confirmBtn) {
       confirmBtn.disabled = true;
-      confirmBtn.textContent = "Processing...";
+      confirmBtn.textContent = "Loading...";
     }
     
-    console.log("[Buy Credits] Creating Stripe checkout session...");
+    console.log("[Buy Credits] Getting Coinbase onramp link...");
     
-    // Create Stripe checkout session for credit purchase
-    const res = await authenticatedFetch(`${BACKEND_BASE_URL}/api/buy-credits`, {
-      method: 'POST',
-      body: JSON.stringify({
-        userId: uid,
-        amount: amount
-      })
+    // Get Coinbase onramp link
+    const url = `${BACKEND_BASE_URL}/api/coinbase-onramp/${uid}${amount > 0 ? `?amount=${amount}` : ''}`;
+    const res = await authenticatedFetch(url, {
+      method: 'GET'
     });
     
     if (!res.ok) {
       const error = await res.json().catch(() => ({}));
-      throw new Error(error.error || error.details || `Failed to create checkout: ${res.status}`);
+      throw new Error(error.error || error.details || `Failed to get onramp link: ${res.status}`);
     }
     
-    const { checkoutUrl } = await res.json();
+    const { onrampUrl, walletAddress } = await res.json();
     
-    console.log("[Buy Credits] Opening Stripe Checkout:", checkoutUrl);
+    console.log("[Buy Credits] Opening Coinbase Onramp:", onrampUrl);
+    console.log("[Buy Credits] Wallet address:", walletAddress);
     
-    // Open Stripe Checkout in new tab
-    chrome.tabs.create({ url: checkoutUrl });
+    // Show wallet address and instructions
+    const message = `Your wallet address: ${walletAddress}\n\nOpening Coinbase onramp. Your balance will update automatically once the transaction confirms on Solana (usually takes 1-2 minutes).`;
+    alert(message);
+    
+    // Open Coinbase onramp in new tab
+    chrome.tabs.create({ url: onrampUrl });
     
     // Return to profile main view
     showProfileMainView();
     
+    // Refresh balance after a delay (to catch the deposit)
+    setTimeout(() => {
+      refreshWalletBalance();
+    }, 60000); // Refresh after 1 minute
+    
   } catch (err) {
-    console.error("[Buy Credits] Failed to create checkout:", err);
+    console.error("[Buy Credits] Failed to get onramp link:", err);
     if (errorMessage) {
-      errorMessage.textContent = `❌ Failed to process payment: ${err.message}\n\nPlease try again.`;
+      errorMessage.textContent = `❌ Failed to open deposit page: ${err.message}\n\nPlease try again.`;
       errorMessage.classList.remove("hidden");
     } else {
-      showNotification(`Failed to process payment: ${err.message}`, 'error');
+      showNotification(`Failed to open deposit page: ${err.message}`, 'error');
     }
     
     if (confirmBtn) {
@@ -3402,25 +3360,7 @@ async function handleProfileWithdraw() {
     // Log user ID for debugging
     console.log(`[Withdraw] User ID: ${uid}`);
     
-    // Check if Stripe Connect is set up
-    try {
-      const connectStatusRes = await authenticatedFetch(`${BACKEND_BASE_URL}/api/stripe-connect/status/${uid}`);
-      if (connectStatusRes.ok) {
-        const connectData = await connectStatusRes.json();
-        console.log(`[Withdraw] Connect status:`, connectData);
-        if (!connectData.connected || !connectData.payoutsEnabled) {
-          if (errorMessage) {
-            errorMessage.textContent = "Please connect your bank account first. Click 'Connect Bank Account' to set it up.";
-            errorMessage.classList.remove("hidden");
-          }
-          return;
-        }
-      } else {
-        console.warn("Could not check Stripe Connect status, proceeding anyway");
-      }
-    } catch (statusErr) {
-      console.error("Error checking Stripe Connect status:", statusErr);
-    }
+    // Stripe Connect check removed - using Coinbase CDP for payments now
     
     // Disable button
     if (confirmBtn) {
@@ -3483,17 +3423,11 @@ async function handleBuyCredits() {
     errorMessage.classList.add("hidden");
   }
   
-  if (amount < 5) {
+  // Note: Amount validation removed - Coinbase onramp handles this
+  // But we can still validate for UX
+  if (amount > 0 && amount < 1) {
     if (errorMessage) {
-      errorMessage.textContent = "Minimum purchase is $5";
-      errorMessage.classList.remove("hidden");
-    }
-    return;
-  }
-  
-  if (amount > 1000) {
-    if (errorMessage) {
-      errorMessage.textContent = "Maximum purchase is $1,000";
+      errorMessage.textContent = "Minimum purchase is $1";
       errorMessage.classList.remove("hidden");
     }
     return;
@@ -3505,43 +3439,50 @@ async function handleBuyCredits() {
     // Disable button
     if (confirmBtn) {
       confirmBtn.disabled = true;
-      confirmBtn.textContent = "Processing...";
+      confirmBtn.textContent = "Loading...";
     }
     
-    console.log("[Buy Credits] Creating Stripe checkout session...");
+    console.log("[Buy Credits] Getting Coinbase onramp link...");
     
-    // Create Stripe checkout session for credit purchase
-    const res = await authenticatedFetch(`${BACKEND_BASE_URL}/api/buy-credits`, {
-      method: 'POST',
-      body: JSON.stringify({
-        userId: uid,
-        amount: amount
-      })
+    // Get Coinbase onramp link
+    const url = `${BACKEND_BASE_URL}/api/coinbase-onramp/${uid}${amount > 0 ? `?amount=${amount}` : ''}`;
+    const res = await authenticatedFetch(url, {
+      method: 'GET'
     });
     
     if (!res.ok) {
       const error = await res.json().catch(() => ({}));
-      throw new Error(error.error || error.details || `Failed to create checkout: ${res.status}`);
+      throw new Error(error.error || error.details || `Failed to get onramp link: ${res.status}`);
     }
     
-    const { checkoutUrl } = await res.json();
+    const { onrampUrl, walletAddress } = await res.json();
     
-    console.log("[Buy Credits] Opening Stripe Checkout:", checkoutUrl);
+    console.log("[Buy Credits] Opening Coinbase Onramp:", onrampUrl);
+    console.log("[Buy Credits] Wallet address:", walletAddress);
     
-    // Open Stripe Checkout in new tab
-    chrome.tabs.create({ url: checkoutUrl });
+    // Show wallet address and instructions
+    const message = `Your wallet address: ${walletAddress}\n\nOpening Coinbase onramp. Your balance will update automatically once the transaction confirms on Solana (usually takes 1-2 minutes).`;
+    alert(message);
+    
+    // Open Coinbase onramp in new tab
+    chrome.tabs.create({ url: onrampUrl });
     
     // Close the overlay
     closeBuyCreditsOverlay();
     
+    // Refresh balance after a delay (to catch the deposit)
+    setTimeout(() => {
+      refreshWalletBalance();
+    }, 60000); // Refresh after 1 minute
+    
   } catch (err) {
-    console.error("[Buy Credits] Failed to create checkout:", err);
+    console.error("[Buy Credits] Failed to get onramp link:", err);
     const errorMessage = document.getElementById("buy-credits-error-message");
     if (errorMessage) {
-      errorMessage.textContent = `❌ Failed to process payment: ${err.message}\n\nPlease try again.`;
+      errorMessage.textContent = `❌ Failed to open deposit page: ${err.message}\n\nPlease try again.`;
       errorMessage.classList.remove("hidden");
     } else {
-      showNotification(`Failed to process payment: ${err.message}`, 'error');
+      showNotification(`Failed to open deposit page: ${err.message}`, 'error');
     }
     
     if (confirmBtn) {

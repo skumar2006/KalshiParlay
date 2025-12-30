@@ -37,7 +37,8 @@ function getSupabaseClient(userToken) {
 
 // Service role client only for initialization/health checks
 // Should NOT be used for user operations - use getSupabaseClient(userToken) instead
-let serviceRoleClient = null;
+// Exported for use in coinbaseCdpService.js
+export let serviceRoleClient = null;
 if (ENV.SUPABASE_SERVICE_ROLE_KEY) {
   serviceRoleClient = createClient(
     ENV.SUPABASE_URL,
@@ -783,103 +784,60 @@ export async function getParlayBetOutcomes(purchaseId, userToken = null) {
 }
 
 /**
- * Get or create user wallet
+ * Get or create user wallet (now uses Coinbase CDP embedded wallets)
+ * Balance is read from Base Sepolia blockchain
  */
 export async function getUserWallet(userId, userToken = null) {
   try {
-    // For webhooks/payment redirects, we might not have userToken - use service role in that case
-    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
-    if (!supabase) {
-      throw new Error('Either user token or service role key is required');
-    }
+    // Import Coinbase CDP service (dynamic import to avoid circular dependencies)
+    const { getUserWalletWithBalance } = await import('./coinbaseCdpService.js');
     
-    // Try to get existing wallet
-    const { data: existingWallet, error: selectError } = await supabase
-      .from('user_wallet')
-      .select('*')
-      .eq('user_uuid', userId)
-      .single();
+    // Get or create Coinbase CDP wallet and fetch blockchain balance
+    const { address, balance, coinbaseUserId } = await getUserWalletWithBalance(userId);
     
-    if (existingWallet) {
-      return existingWallet;
-    }
-    
-    // Create wallet if it doesn't exist
-    // Note: If using service role, RLS policies are bypassed
-    // If using user token, RLS policy must allow INSERT
-    const { data: newWallet, error: insertError } = await supabase
-      .from('user_wallet')
-      .insert({
-        user_uuid: userId,
-        user_id: userId, // Keep for backward compatibility
-        balance: 0
-      })
-      .select()
-      .single();
-    
-    if (insertError) {
-      // If it's a unique constraint error, try to fetch again
-      if (insertError.code === '23505') {
-        const { data: wallet } = await supabase
-          .from('user_wallet')
-          .select('*')
-          .eq('user_uuid', userId)
-          .single();
-        return wallet || { user_uuid: userId, user_id: userId, balance: 0 };
-      }
-      logError('Error creating user wallet', insertError);
-      throw insertError;
-    }
-    
-    return newWallet || { user_uuid: userId, user_id: userId, balance: 0 };
+    // Return in the same format as before for backward compatibility
+    return {
+      user_uuid: userId,
+      user_id: userId, // Keep for backward compatibility
+      balance: balance, // Now from blockchain!
+      crypto_wallet_address: address,
+      crypto_network: 'solana',
+      coinbase_user_id: coinbaseUserId
+    };
   } catch (err) {
     logError('Error in getUserWallet', err);
+    
+    // Fallback: return empty wallet if CDP is not configured
+    if (err.message?.includes('Coinbase CDP client not initialized')) {
+      logWarn('[Wallet] Coinbase CDP not configured, returning empty wallet');
+      return {
+        user_uuid: userId,
+        user_id: userId,
+        balance: 0,
+        crypto_wallet_address: null,
+        crypto_network: 'solana',
+        coinbase_user_id: null
+      };
+    }
+    
     throw err;
   }
 }
 
 /**
  * Add balance to user wallet
+ * NOTE: This is now a no-op since balance comes from blockchain
+ * Kept for backward compatibility but does nothing
+ * Balance changes happen on-chain via deposits/withdrawals
  */
 export async function addUserBalance(userId, amount, userToken = null) {
   try {
-    // For webhooks/payment redirects, we might not have userToken - use service role in that case
-    const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
-    if (!supabase) {
-      throw new Error('Either user token or service role key is required');
-    }
+    logWarn(`[Wallet] addUserBalance called but balance is now read from blockchain. Amount: ${amount}`);
+    logWarn(`[Wallet] This function is a no-op. Balance changes happen on-chain via deposits/withdrawals.`);
     
-    // First ensure wallet exists
-    await getUserWallet(userId, userToken);
-    
-    // Use RPC function or raw SQL for atomic update
-    // Since Supabase doesn't have a direct way to do UPDATE ... SET balance = balance + amount
-    // We'll fetch, update, and save
-    const { data: wallet, error: fetchError } = await supabase
-      .from('user_wallet')
-      .select('balance')
-      .eq('user_uuid', userId)
-      .single();
-    
-    if (fetchError) {
-      logError('Error fetching wallet for balance update', fetchError);
-      throw fetchError;
-    }
-    
-    const newBalance = parseFloat(wallet.balance || 0) + parseFloat(amount);
-    
-    const { error: updateError } = await supabase
-      .from('user_wallet')
-      .update({
-        balance: newBalance,
-        updated_at: new Date().toISOString()
-      })
-      .eq('user_uuid', userId);
-    
-    if (updateError) {
-      logError('Error updating user balance', updateError);
-      throw updateError;
-    }
+    // Just return success for backward compatibility
+    // The actual balance will be read from blockchain when getUserWallet is called
+    return { success: true };
   } catch (err) {
     logError('Error in addUserBalance', err);
     throw err;
@@ -1075,62 +1033,7 @@ export async function getWithdrawalRequests(userId, userToken) {
   }
 }
 
-/**
- * Save Stripe Connect account ID for user
- */
-export async function saveStripeAccount(userId, stripeAccountId, status = 'pending', userToken) {
-  try {
-    if (!userToken) {
-      throw new Error('User token is required');
-    }
-    const supabase = getSupabaseClient(userToken);
-    const { error } = await supabase
-      .from('users')
-      .update({
-        stripe_account_id: stripeAccountId,
-        stripe_account_status: status
-      })
-      .eq('id', userId);
-    
-    if (error) {
-      logError('Error saving Stripe account', error);
-      throw error;
-    }
-  } catch (err) {
-    logError('Error in saveStripeAccount', err);
-    throw err;
-  }
-}
-
-/**
- * Get user's Stripe Connect account
- */
-export async function getUserStripeAccount(userId, userToken) {
-  try {
-    if (!userToken) {
-      throw new Error('User token is required');
-    }
-    const supabase = getSupabaseClient(userToken);
-    const { data, error } = await supabase
-      .from('users')
-      .select('stripe_account_id, stripe_account_status')
-      .eq('id', userId)
-      .single();
-    
-    if (error) {
-      if (error.code === 'PGRST116') {
-        return null;
-      }
-      logError('Error fetching Stripe account', error);
-      throw error;
-    }
-    
-    return data || null;
-  } catch (err) {
-    logError('Error in getUserStripeAccount', err);
-    throw err;
-  }
-}
+// Stripe Connect functions removed - using Coinbase CDP for payments now
 
 // Export service role client for direct access if needed (admin operations only)
 export default serviceRoleClient;

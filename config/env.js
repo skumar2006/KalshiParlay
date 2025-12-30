@@ -33,9 +33,11 @@ export function validateEnvironment() {
     'KALSHI_API_KEY',
     'KALSHI_DEMO_API_KEY',
     'KALSHI_DEMO_PRIVATE_KEY',
-    'STRIPE_API_KEY',
-    'STRIPE_DEMO_API_KEY',
     'OPENAI_API_KEY',
+    'COINBASE_CDP_PROJECT_ID',
+    'COINBASE_CDP_API_KEY_ID',
+    'COINBASE_CDP_API_KEY_SECRET',
+    'COINBASE_CDP_WALLET_SECRET',
   ];
 
   const missingRecommended = recommended.filter(key => !process.env[key]);
@@ -108,13 +110,7 @@ export const ENV = {
   KALSHI_PRIVATE_KEY: getEnv('KALSHI_PRIVATE_KEY'),
   KALSHI_API_BASE_URL: getEnv('KALSHI_API_BASE_URL'), // Will be set based on environment if not provided
   
-  // Stripe configuration
-  STRIPE_API_KEY: getEnv('STRIPE_API_KEY'), // Production key (sk_live_...)
-  STRIPE_DEMO_API_KEY: getEnv('STRIPE_DEMO_API_KEY'), // Demo/test key (sk_test_...)
-  STRIPE_WEBHOOK_SECRET: getEnv('STRIPE_WEBHOOK_SECRET'), // Production webhook secret
-  STRIPE_DEMO_WEBHOOK_SECRET: getEnv('STRIPE_DEMO_WEBHOOK_SECRET'), // Demo/test webhook secret
-  
-  // Backend URL (for production checkout redirects)
+  // Backend URL (for production redirects)
   BACKEND_BASE_URL: getEnv('BACKEND_BASE_URL'),
   
   // OpenAI configuration
@@ -127,6 +123,19 @@ export const ENV = {
   // Hedging parameters
   HEDGE_BETA: parseFloat(getEnv('HEDGE_BETA', '0.6')), // Fraction of margin to spend (default 0.6 = 60%)
   HEDGE_ALPHA_MAX: parseFloat(getEnv('HEDGE_ALPHA_MAX', '0.4')), // Max hedge fraction (default 0.4 = 40%)
+  
+  // Coinbase CDP configuration
+  COINBASE_CDP_PROJECT_ID: getEnv('COINBASE_CDP_PROJECT_ID'),
+  COINBASE_CDP_API_KEY_ID: getEnv('COINBASE_CDP_API_KEY_ID') || getEnv('COINBASE_CDP_API_KEY_NAME'), // Support both names
+  COINBASE_CDP_API_KEY_SECRET: getEnv('COINBASE_CDP_API_KEY_SECRET') || getEnv('COINBASE_CDP_PRIVATE_KEY'), // Support both names
+  COINBASE_CDP_WALLET_SECRET: getEnv('COINBASE_CDP_WALLET_SECRET'),
+  
+  // Coinbase Onramp Orders API v2 (simpler API key authentication)
+  COINBASE_ONRAMP_APP_ID: getEnv('COINBASE_ONRAMP_APP_ID'),
+  COINBASE_ONRAMP_API_KEY: getEnv('COINBASE_ONRAMP_API_KEY'),
+  
+  // Base Sepolia RPC endpoint
+  BASE_SEPOLIA_RPC: getEnv('BASE_SEPOLIA_RPC', 'https://sepolia.base.org'),
 };
 
 // Set Kalshi API base URL based on environment if not explicitly set
@@ -136,17 +145,6 @@ if (!ENV.KALSHI_API_BASE_URL) {
     : 'https://demo-api.kalshi.co/trade-api/v2';
 }
 
-// Select Stripe API key based on environment (similar to Kalshi)
-ENV.STRIPE_API_KEY_SELECTED = ENV.IS_PRODUCTION
-  ? ENV.STRIPE_API_KEY
-  : (ENV.STRIPE_DEMO_API_KEY || ENV.STRIPE_API_KEY); // Fallback to production key if demo not set
-
-// Select Stripe webhook secret based on environment
-ENV.STRIPE_WEBHOOK_SECRET_SELECTED = ENV.IS_PRODUCTION
-  ? ENV.STRIPE_WEBHOOK_SECRET
-  : (ENV.STRIPE_DEMO_WEBHOOK_SECRET || ENV.STRIPE_WEBHOOK_SECRET); // Fallback to production secret if demo not set
-
-// Detect Stripe environment from selected API key (if starts with sk_live_ it's production)
-ENV.STRIPE_IS_PRODUCTION = ENV.STRIPE_API_KEY_SELECTED?.startsWith('sk_live_') || false;
+// Stripe configuration removed - using Coinbase CDP for payments now
 
 

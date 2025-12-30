@@ -48,6 +48,11 @@ keys/
 # Database
 *.db
 *.sqlite
+
+# Extension build directories
+kalshi-parlay-extension/
+kalshi-parlay-extension.zip
+
 # Documentation files (ignore all .md except README.md)
 *.md
 !README.md

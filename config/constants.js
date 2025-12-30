@@ -8,10 +8,7 @@ export const CONFIG = {
     DEFAULT_PORT: 4000,
     HEALTH_CHECK_PATH: '/health'
   },
-  STRIPE: {
-    PAYMENT_METHOD_TYPES: ['card'],
-    PAYMENT_MODE: 'payment'
-  },
+  // Stripe config removed - using Coinbase CDP for payments now
   DATABASE: {
     SSL_ENABLED_IN_PRODUCTION: true
   }
