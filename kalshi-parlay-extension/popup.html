@@ -94,6 +94,14 @@
             />
           </div>
 
+          <div class="connect-bank-message" id="connect-bank-message" style="display: none;">
+            <p>To withdraw funds, please connect your bank account via Stripe.</p>
+            <button id="modal-connect-bank-btn" class="connect-bank-btn">Connect Bank Account</button>
+          </div>
+
+          <div class="withdrawal-note">
+            <p><strong>Note:</strong> Funds will be transferred to your Stripe account. You can then withdraw to your bank account from your Stripe dashboard, or funds will be automatically paid out.</p>
+          </div>
 
           <!-- Error message display -->
           <div id="withdraw-error-message" class="bet-error-message hidden">
@@ -241,7 +249,10 @@
               
               <div style="display: flex; flex-direction: column; gap: 8px;">
                 <button id="profile-buy-credits-btn" class="buy-credits-btn" style="width: 100%;">
-                  Add Funds
+                  Buy Credits
+                </button>
+                <button id="profile-connect-bank-btn" class="connect-bank-btn" style="display: none; width: 100%;">
+                  Connect Bank Account
                 </button>
                 <button id="profile-withdraw-btn" class="withdraw-btn" disabled style="width: 100%;">
                   Withdraw Funds
@@ -305,7 +316,14 @@
               />
             </div>
 
+            <div class="connect-bank-message" id="profile-connect-bank-message" style="display: none;">
+              <p>To withdraw funds, please connect your bank account via Stripe.</p>
+              <button id="profile-modal-connect-bank-btn" class="connect-bank-btn">Connect Bank Account</button>
+            </div>
 
+            <div class="withdrawal-note">
+              <p><strong>Note:</strong> Funds will be transferred to your Stripe account. You can then withdraw to your bank account from your Stripe dashboard, or funds will be automatically paid out.</p>
+            </div>
 
             <!-- Error message display -->
             <div id="profile-withdraw-error-message" class="bet-error-message hidden">

@@ -8,10 +8,6 @@ export const CONFIG = {
     DEFAULT_PORT: 4000,
     HEALTH_CHECK_PATH: '/health'
   },
-  STRIPE: {
-    PAYMENT_METHOD_TYPES: ['card'],
-    PAYMENT_MODE: 'payment'
-  },
   DATABASE: {
     SSL_ENABLED_IN_PRODUCTION: true
   }

@@ -16,86 +16,61 @@ let supabase = null;
 // Load backend URL and Supabase config from backend
 async function loadBackendConfig() {
   try {
-    // FORCE LOCALHOST FOR DEVELOPMENT - Try localhost first
-    const localhostUrl = "http://localhost:4000";
-    console.log(`[Config] 🔧 DEVELOPMENT MODE: Trying localhost first: ${localhostUrl}`);
+    // Try to get backend URL from storage first (user might have set it)
+    const stored = await chrome.storage.sync.get('backendUrl');
+    if (stored.backendUrl) {
+      BACKEND_BASE_URL = stored.backendUrl;
+      console.log(`[Config] Using stored backend URL: ${BACKEND_BASE_URL}`);
+    }
+    
+    // Try production URLs first (more reliable than localhost)
+    const productionUrls = [
+      'https://kalshiparlay-production.up.railway.app',
+      'https://kalshi-parlay-production.up.railway.app',
+      'https://kalshi-parlay.railway.app',
+    ];
     
     let res = null;
     let lastError = null;
     
-    // Try localhost first (for local development) - even if stored URL exists
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2000);
-      
-      const localhostRes = await fetch(`${localhostUrl}/api/config`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (localhostRes.ok) {
-        BACKEND_BASE_URL = localhostUrl;
-        await chrome.storage.sync.set({ backendUrl: localhostUrl });
-        console.log(`[Config] ✅ Using localhost backend: ${BACKEND_BASE_URL}`);
-        res = localhostRes;
-      } else {
-        console.warn(`[Config] ❌ Localhost returned status ${localhostRes.status}`);
-        lastError = new Error(`Localhost returned ${localhostRes.status}`);
-      }
-    } catch (e) {
-      if (e.name === 'AbortError') {
-        console.warn(`[Config] ⏱️ Localhost timeout (server may not be running)`);
-      } else {
-        console.warn(`[Config] ❌ Localhost not available:`, e.message);
-      }
-      lastError = e;
-    }
-    
-    // If localhost failed, try production URLs as fallback
-    if (!res) {
-      console.log(`[Config] Localhost unavailable, trying production URLs...`);
-      const productionUrls = [
-        'https://kalshiparlay-production.up.railway.app',
-        'https://kalshi-parlay-production.up.railway.app',
-        'https://kalshi-parlay.railway.app',
-      ];
-      
-      // Try production URLs
-      for (const url of productionUrls) {
-        try {
-          console.log(`[Config] Trying backend URL: ${url}`);
-          const prodRes = await fetch(`${url}/api/config`, {
-            method: 'GET',
-            headers: {
-              'Content-Type': 'application/json'
-            }
-          });
-          if (prodRes.ok) {
-            BACKEND_BASE_URL = url;
-            await chrome.storage.sync.set({ backendUrl: url });
-            console.log(`[Config] ✅ Found production backend: ${BACKEND_BASE_URL}`);
-            res = prodRes;
-            break;
-          } else {
-            console.warn(`[Config] ❌ ${url} returned status ${prodRes.status}`);
+    // Try production URLs first
+    for (const url of productionUrls) {
+      try {
+        console.log(`[Config] Trying backend URL: ${url}`);
+        const prodRes = await fetch(`${url}/api/config`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json'
           }
-        } catch (e) {
-          console.warn(`[Config] ❌ Failed to connect to ${url}:`, e.message);
-          lastError = e;
-          continue;
+        });
+        if (prodRes.ok) {
+          BACKEND_BASE_URL = url;
+          await chrome.storage.sync.set({ backendUrl: url });
+          console.log(`[Config] ✅ Found production backend: ${BACKEND_BASE_URL}`);
+          res = prodRes;
+          break;
+        } else {
+          console.warn(`[Config] ❌ ${url} returned status ${prodRes.status}`);
         }
+      } catch (e) {
+        console.warn(`[Config] ❌ Failed to connect to ${url}:`, e.message);
+        lastError = e;
+        continue;
       }
     }
     
-    // If all URLs failed, throw error
+    // If production URLs failed, try localhost (for local dev)
     if (!res) {
-      console.error(`[Config] ❌ All backends failed. Last error:`, lastError?.message);
-      throw new Error(`Failed to connect to any backend. Last error: ${lastError?.message || 'Unknown error'}`);
+      console.log(`[Config] Trying localhost fallback: ${BACKEND_BASE_URL}`);
+      try {
+        res = await fetch(`${BACKEND_BASE_URL}/api/config`);
+        if (!res.ok) {
+          throw new Error(`Failed to load config: ${res.status}`);
+        }
+      } catch (e) {
+        console.error(`[Config] ❌ Localhost also failed:`, e.message);
+        throw new Error(`Failed to connect to any backend. Last error: ${lastError?.message || e.message}`);
+      }
     }
     
     const backendConfig = await res.json();
@@ -2073,6 +2048,9 @@ async function init() {
     
     // Load wallet balance
   await loadWalletBalance();
+  
+  // Check Stripe Connect status
+  await checkStripeConnectStatus();
   } catch (err) {
     console.error('Error in init function:', err);
     // Ensure login overlay is visible on error
@@ -2179,6 +2157,24 @@ function setupEventListeners() {
     profileRefreshWalletBtn.hasListener = true;
   }
   
+  // Connect bank account button (main and profile)
+  const connectBankBtn = document.getElementById("connect-bank-btn");
+  if (connectBankBtn && !connectBankBtn.hasListener) {
+    connectBankBtn.addEventListener("click", connectBankAccount);
+    connectBankBtn.hasListener = true;
+  }
+  
+  const profileConnectBankBtn = document.getElementById("profile-connect-bank-btn");
+  if (profileConnectBankBtn && !profileConnectBankBtn.hasListener) {
+    profileConnectBankBtn.addEventListener("click", connectBankAccount);
+    profileConnectBankBtn.hasListener = true;
+  }
+
+  const modalConnectBankBtn = document.getElementById("modal-connect-bank-btn");
+  if (modalConnectBankBtn && !modalConnectBankBtn.hasListener) {
+    modalConnectBankBtn.addEventListener("click", connectBankAccount);
+    modalConnectBankBtn.hasListener = true;
+  }
   
   // Withdraw button
   // Withdraw button (main and profile)
@@ -2245,6 +2241,12 @@ function setupEventListeners() {
     profileConfirmWithdrawBtn.hasListener = true;
   }
   
+  // Profile modal connect bank button
+  const profileModalConnectBankBtn = document.getElementById("profile-modal-connect-bank-btn");
+  if (profileModalConnectBankBtn && !profileModalConnectBankBtn.hasListener) {
+    profileModalConnectBankBtn.addEventListener("click", connectBankAccount);
+    profileModalConnectBankBtn.hasListener = true;
+  }
   
   // Close withdraw overlay button
   const closeWithdrawBtn = document.getElementById("close-withdraw-btn");
@@ -2701,6 +2703,63 @@ async function claimWinnings(sessionId, amount) {
   }
 }
 
+async function checkStripeConnectStatus() {
+  try {
+    const uid = await getUserId(currentEnvironment);
+    const res = await authenticatedFetch(`${BACKEND_BASE_URL}/api/stripe-connect/status/${uid}`);
+    
+    if (res.ok) {
+      const data = await res.json();
+      const connectBtn = document.getElementById("connect-bank-btn");
+      const profileConnectBtn = document.getElementById("profile-connect-bank-btn");
+      const withdrawBtn = document.getElementById("withdraw-btn");
+      const profileWithdrawBtn = document.getElementById("profile-withdraw-btn");
+      const connectBankMessage = document.getElementById("connect-bank-message");
+      const profileConnectBankMessage = document.getElementById("profile-connect-bank-message");
+      
+      if (data.connected && data.payoutsEnabled) {
+        // Account is connected and ready
+        if (connectBtn) connectBtn.style.display = "none";
+        if (profileConnectBtn) profileConnectBtn.style.display = "none";
+        if (withdrawBtn) withdrawBtn.disabled = false;
+        if (profileWithdrawBtn) profileWithdrawBtn.disabled = false;
+        if (connectBankMessage) connectBankMessage.style.display = "none";
+        if (profileConnectBankMessage) profileConnectBankMessage.style.display = "none";
+        return true;
+      } else {
+        // Need to connect account
+        if (connectBtn) connectBtn.style.display = "block";
+        if (profileConnectBtn) profileConnectBtn.style.display = "block";
+        if (withdrawBtn) withdrawBtn.disabled = true;
+        if (profileWithdrawBtn) profileWithdrawBtn.disabled = true;
+        if (connectBankMessage) connectBankMessage.style.display = "block";
+        if (profileConnectBankMessage) profileConnectBankMessage.style.display = "block";
+        return false;
+      }
+    }
+  } catch (err) {
+    console.error("Failed to check Stripe Connect status:", err);
+    return false;
+  }
+}
+
+async function connectBankAccount() {
+  try {
+    const uid = await getUserId(currentEnvironment);
+    const res = await authenticatedFetch(`${BACKEND_BASE_URL}/api/stripe-connect/onboard/${uid}`);
+    
+    if (res.ok) {
+      const data = await res.json();
+      // Open Stripe onboarding in new tab
+      chrome.tabs.create({ url: data.url });
+    } else {
+      showNotification("Failed to start bank account connection", 'error');
+    }
+  } catch (err) {
+    console.error("Failed to connect bank account:", err);
+    showNotification("Failed to connect bank account", 'error');
+  }
+}
 
 async function loadWalletBalance() {
   try {
@@ -2741,15 +2800,29 @@ async function loadWalletBalance() {
         buyCreditsBalanceDisplay.textContent = `$${balance.toFixed(2)}`;
       }
       
+      // Check Stripe Connect status
+      await checkStripeConnectStatus();
+      
       // Enable/disable withdraw button based on balance (profile and main)
       const profileWithdrawBtn = document.getElementById("profile-withdraw-btn");
       const withdrawBtn = document.getElementById("withdraw-btn");
+      const isConnected = await checkStripeConnectStatus();
       
       if (profileWithdrawBtn) {
-        profileWithdrawBtn.disabled = balance <= 0;
+        profileWithdrawBtn.disabled = balance <= 0 || !isConnected;
       }
       if (withdrawBtn) {
-        withdrawBtn.disabled = balance <= 0;
+        withdrawBtn.disabled = balance <= 0 || !isConnected;
+      }
+      
+      // Update connect bank button visibility
+      const profileConnectBtn = document.getElementById("profile-connect-bank-btn");
+      const connectBtn = document.getElementById("connect-bank-btn");
+      if (profileConnectBtn) {
+        profileConnectBtn.style.display = isConnected ? "none" : "block";
+      }
+      if (connectBtn) {
+        connectBtn.style.display = isConnected ? "none" : "block";
       }
       
       return balance;
@@ -2837,8 +2910,9 @@ function showProfileWithdrawView() {
   if (profileBackBtn) profileBackBtn.style.display = "block";
   if (profileHeaderTitle) profileHeaderTitle.textContent = "Withdraw Funds";
   
-  // Load wallet balance
+  // Load wallet balance and check Stripe Connect status
   loadWalletBalance();
+  checkStripeConnectStatus();
   
   // Reset amount input
   const amountInput = document.getElementById("profile-withdraw-amount-input");
@@ -3032,6 +3106,7 @@ function showWithdrawOverlay() {
   if (!overlay) return;
   
   loadWalletBalance();
+  checkStripeConnectStatus();
   
   // Reset amount input
   const amountInput = document.getElementById("withdraw-amount-input");
@@ -3090,6 +3165,27 @@ async function handleWithdraw() {
     // Log user ID for debugging
     console.log(`[Withdraw] User ID: ${uid}`);
     
+    // Check if Stripe Connect is set up
+    try {
+      const connectStatusRes = await authenticatedFetch(`${BACKEND_BASE_URL}/api/stripe-connect/status/${uid}`);
+      if (connectStatusRes.ok) {
+        const connectData = await connectStatusRes.json();
+        console.log(`[Withdraw] Connect status:`, connectData);
+        if (!connectData.connected || !connectData.payoutsEnabled) {
+          if (errorMessage) {
+            errorMessage.textContent = "Please connect your bank account first. Click 'Connect Bank Account' to set it up.";
+            errorMessage.classList.remove("hidden");
+          }
+          return;
+        }
+      } else {
+        // If we can't check status, still try to proceed (backend will handle it)
+        console.warn("Could not check Stripe Connect status, proceeding anyway");
+      }
+    } catch (statusErr) {
+      console.error("Error checking Stripe Connect status:", statusErr);
+      // Continue anyway - backend will handle validation
+    }
     
     // Check platform balance (optional - for better error messages)
     try {
@@ -3124,7 +3220,7 @@ async function handleWithdraw() {
     
     if (!res.ok) {
       const error = await res.json().catch(() => ({}));
-      // Show the actual error message
+      // Show the actual error message from Stripe
       const errorMsg = error.error || error.details || `Failed to process withdrawal (${res.status})`;
       if (errorMessage) {
         errorMessage.textContent = `❌ ${errorMsg}`;
@@ -3205,8 +3301,7 @@ async function handleProfileBuyCredits() {
     errorMessage.classList.add("hidden");
   }
   
-  // Only validate minimum if amount is provided (0 means user chooses)
-  if (amount > 0 && amount < 5) {
+  if (amount < 5) {
     if (errorMessage) {
       errorMessage.textContent = "Minimum purchase is $5";
       errorMessage.classList.remove("hidden");
@@ -3231,61 +3326,39 @@ async function handleProfileBuyCredits() {
       confirmBtn.textContent = "Processing...";
     }
     
-    console.log("[Buy Credits] Getting wallet address...");
+    console.log("[Buy Credits] Creating Stripe checkout session...");
     
-    // Get wallet address from backend
-    const walletRes = await authenticatedFetch(`${BACKEND_BASE_URL}/api/wallet/${uid}`);
-    if (!walletRes.ok) {
-      const error = await walletRes.json().catch(() => ({}));
-      throw new Error(error.error || error.details || "Failed to fetch wallet");
-    }
-    const walletData = await walletRes.json();
-    console.log("[Buy Credits] Wallet data received:", walletData);
-    
-    const walletAddress = walletData.walletAddress;
-    
-    if (!walletAddress) {
-      console.error("[Buy Credits] No wallet address in response:", walletData);
-      throw new Error("Wallet address not found. Please ensure your wallet is set up.");
-    }
-    
-    // Build ZKP2P URL client-side
-    // Solana USDC: chainId 792703809, token address EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-    const params = new URLSearchParams({
-      referrer: 'Kalshi Parlay Helper',
-      callbackUrl: `${BACKEND_BASE_URL}/api/zkp2p-callback`,
-      toToken: '792703809:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // Solana USDC
-      recipientAddress: walletAddress,
+    // Create Stripe checkout session for credit purchase
+    const res = await authenticatedFetch(`${BACKEND_BASE_URL}/api/buy-credits`, {
+      method: 'POST',
+      body: JSON.stringify({
+        userId: uid,
+        amount: amount
+      })
     });
     
-    // Add optional amount (convert to USDC with 6 decimals if provided)
-    if (amount > 0) {
-      const amountUsdc = (amount * 1000000).toString(); // Convert to USDC (6 decimals)
-      params.append('amountUsdc', amountUsdc);
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.error || error.details || `Failed to create checkout: ${res.status}`);
     }
     
-    const zkp2pUrl = `https://zkp2p.xyz/swap?${params.toString()}`;
+    const { checkoutUrl } = await res.json();
     
-    console.log("[Buy Credits] Opening ZKP2P:", zkp2pUrl);
+    console.log("[Buy Credits] Opening Stripe Checkout:", checkoutUrl);
     
-    // Open ZKP2P in new tab automatically
-    chrome.tabs.create({ url: zkp2pUrl });
+    // Open Stripe Checkout in new tab
+    chrome.tabs.create({ url: checkoutUrl });
     
     // Return to profile main view
     showProfileMainView();
     
-    // Refresh balance after a delay
-    setTimeout(() => {
-      loadWalletBalance();
-    }, 60000); // Refresh after 1 minute
-    
   } catch (err) {
-    console.error("[Buy Credits] Failed:", err);
+    console.error("[Buy Credits] Failed to create checkout:", err);
     if (errorMessage) {
-      errorMessage.textContent = `❌ Failed to open deposit page: ${err.message}`;
+      errorMessage.textContent = `❌ Failed to process payment: ${err.message}\n\nPlease try again.`;
       errorMessage.classList.remove("hidden");
     } else {
-      showNotification(`Failed to open deposit page: ${err.message}`, 'error');
+      showNotification(`Failed to process payment: ${err.message}`, 'error');
     }
     
     if (confirmBtn) {
@@ -3329,6 +3402,25 @@ async function handleProfileWithdraw() {
     // Log user ID for debugging
     console.log(`[Withdraw] User ID: ${uid}`);
     
+    // Check if Stripe Connect is set up
+    try {
+      const connectStatusRes = await authenticatedFetch(`${BACKEND_BASE_URL}/api/stripe-connect/status/${uid}`);
+      if (connectStatusRes.ok) {
+        const connectData = await connectStatusRes.json();
+        console.log(`[Withdraw] Connect status:`, connectData);
+        if (!connectData.connected || !connectData.payoutsEnabled) {
+          if (errorMessage) {
+            errorMessage.textContent = "Please connect your bank account first. Click 'Connect Bank Account' to set it up.";
+            errorMessage.classList.remove("hidden");
+          }
+          return;
+        }
+      } else {
+        console.warn("Could not check Stripe Connect status, proceeding anyway");
+      }
+    } catch (statusErr) {
+      console.error("Error checking Stripe Connect status:", statusErr);
+    }
     
     // Disable button
     if (confirmBtn) {
@@ -3391,8 +3483,7 @@ async function handleBuyCredits() {
     errorMessage.classList.add("hidden");
   }
   
-  // Only validate minimum if amount is provided (0 means user chooses)
-  if (amount > 0 && amount < 5) {
+  if (amount < 5) {
     if (errorMessage) {
       errorMessage.textContent = "Minimum purchase is $5";
       errorMessage.classList.remove("hidden");
@@ -3417,61 +3508,40 @@ async function handleBuyCredits() {
       confirmBtn.textContent = "Processing...";
     }
     
-    console.log("[Buy Credits] Getting wallet address...");
+    console.log("[Buy Credits] Creating Stripe checkout session...");
     
-    // Get wallet address from backend
-    const walletRes = await authenticatedFetch(`${BACKEND_BASE_URL}/api/wallet/${uid}`);
-    if (!walletRes.ok) {
-      const error = await walletRes.json().catch(() => ({}));
-      throw new Error(error.error || error.details || "Failed to fetch wallet");
-    }
-    const walletData = await walletRes.json();
-    console.log("[Buy Credits] Wallet data received:", walletData);
-    
-    const walletAddress = walletData.walletAddress;
-    
-    if (!walletAddress) {
-      console.error("[Buy Credits] No wallet address in response:", walletData);
-      throw new Error("Wallet address not found. Please ensure your wallet is set up.");
-    }
-    
-    // Build ZKP2P URL client-side
-    // Solana USDC: chainId 792703809, token address EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-    const params = new URLSearchParams({
-      referrer: 'Kalshi Parlay Helper',
-      callbackUrl: `${BACKEND_BASE_URL}/api/zkp2p-callback`,
-      toToken: '792703809:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // Solana USDC
-      recipientAddress: walletAddress,
+    // Create Stripe checkout session for credit purchase
+    const res = await authenticatedFetch(`${BACKEND_BASE_URL}/api/buy-credits`, {
+      method: 'POST',
+      body: JSON.stringify({
+        userId: uid,
+        amount: amount
+      })
     });
     
-    // Add optional amount (convert to USDC with 6 decimals if provided)
-    if (amount > 0) {
-      const amountUsdc = (amount * 1000000).toString(); // Convert to USDC (6 decimals)
-      params.append('amountUsdc', amountUsdc);
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.error || error.details || `Failed to create checkout: ${res.status}`);
     }
     
-    const zkp2pUrl = `https://zkp2p.xyz/swap?${params.toString()}`;
+    const { checkoutUrl } = await res.json();
     
-    console.log("[Buy Credits] Opening ZKP2P:", zkp2pUrl);
+    console.log("[Buy Credits] Opening Stripe Checkout:", checkoutUrl);
     
-    // Open ZKP2P in new tab automatically
-    chrome.tabs.create({ url: zkp2pUrl });
+    // Open Stripe Checkout in new tab
+    chrome.tabs.create({ url: checkoutUrl });
     
     // Close the overlay
     closeBuyCreditsOverlay();
     
-    // Refresh balance after a delay
-    setTimeout(() => {
-      loadWalletBalance();
-    }, 60000); // Refresh after 1 minute
-    
   } catch (err) {
-    console.error("[Buy Credits] Failed:", err);
+    console.error("[Buy Credits] Failed to create checkout:", err);
+    const errorMessage = document.getElementById("buy-credits-error-message");
     if (errorMessage) {
-      errorMessage.textContent = `❌ Failed to open deposit page: ${err.message}`;
+      errorMessage.textContent = `❌ Failed to process payment: ${err.message}\n\nPlease try again.`;
       errorMessage.classList.remove("hidden");
     } else {
-      showNotification(`Failed to open deposit page: ${err.message}`, 'error');
+      showNotification(`Failed to process payment: ${err.message}`, 'error');
     }
     
     if (confirmBtn) {

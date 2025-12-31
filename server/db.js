@@ -158,6 +158,28 @@ export async function getOrCreateUser(userId, userToken) {
       throw insertError;
     }
     
+    // New user created - trigger wallet creation
+    // This ensures every new user gets a wallet automatically
+    try {
+      logInfo(`[getOrCreateUser] New user created (${userId}), triggering wallet creation...`);
+      // Call getUserWallet to create the wallet (it will handle CDP or database fallback)
+      const walletResult = await getUserWallet(userId, userToken);
+      logInfo(`[getOrCreateUser] Wallet created successfully for ${userId}`, {
+        hasAddress: !!walletResult?.crypto_wallet_address,
+        address: walletResult?.crypto_wallet_address,
+        network: walletResult?.crypto_network
+      });
+    } catch (walletError) {
+      // Don't fail user creation if wallet creation fails - wallet can be created later
+      logError(`[getOrCreateUser] Failed to create wallet for new user ${userId}`, {
+        error: walletError.message,
+        stack: walletError.stack,
+        userId,
+        hasToken: !!userToken
+      });
+      logWarn(`[getOrCreateUser] Wallet will be created on first access for user ${userId}`);
+    }
+    
     return newUser || { id: userId, user_id: userId };
   } catch (err) {
     logError('Error in getOrCreateUser', err);
@@ -786,25 +808,156 @@ export async function getParlayBetOutcomes(purchaseId, userToken = null) {
  * Get or create user wallet
  */
 export async function getUserWallet(userId, userToken = null) {
+  console.log(`[getUserWallet] ===== START ===== User: ${userId}, Has Token: ${!!userToken}`);
+  
   try {
-    // For webhooks/payment redirects, we might not have userToken - use service role in that case
+    logInfo(`[getUserWallet] Getting wallet for user ${userId}...`);
+    
+    // Try to use Coinbase CDP service to get wallet with address and balance
+    try {
+      console.log(`[getUserWallet] Attempting CDP import...`);
+      logInfo(`[getUserWallet] Attempting to use Coinbase CDP service...`);
+      const { getUserWalletWithBalance } = await import('./coinbaseCdpService.js');
+      console.log(`[getUserWallet] CDP imported, calling getUserWalletWithBalance...`);
+      const walletData = await getUserWalletWithBalance(userId, userToken);
+      console.log(`[getUserWallet] CDP returned:`, JSON.stringify(walletData, null, 2));
+      
+      if (!walletData || !walletData.crypto_wallet_address) {
+        throw new Error('CDP service returned wallet data but no crypto_wallet_address');
+      }
+      
+      logInfo(`[getUserWallet] CDP wallet retrieved successfully:`, {
+        address: walletData.crypto_wallet_address,
+        balance: walletData.balance
+      });
+      
+      // Return wallet data in expected format
+      return {
+        user_uuid: userId,
+        user_id: userId,
+        crypto_wallet_address: walletData.crypto_wallet_address,
+        crypto_network: 'solana',
+        balance: walletData.balance,
+      };
+    } catch (cdpError) {
+      // If CDP is not configured or fails, fall back to database-only approach
+      logWarn('[getUserWallet] Coinbase CDP not available or failed, falling back to database-only wallet', {
+        error: cdpError.message,
+        stack: cdpError.stack,
+        userId
+      });
+    }
+    
+    // Fallback: For webhooks/payment redirects, we might not have userToken - use service role in that case
+    logInfo(`[getUserWallet] Using database fallback for user ${userId}...`);
     const supabase = userToken ? getSupabaseClient(userToken) : serviceRoleClient;
     if (!supabase) {
-      throw new Error('Either user token or service role key is required');
+      const error = new Error('Either user token or service role key is required');
+      logError('[getUserWallet] No Supabase client available', { userId, hasToken: !!userToken });
+      throw error;
     }
     
     // Try to get existing wallet
+    logInfo(`[getUserWallet] Querying database for existing wallet...`);
     const { data: existingWallet, error: selectError } = await supabase
       .from('user_wallet')
       .select('*')
       .eq('user_uuid', userId)
       .single();
     
+    if (selectError && selectError.code !== 'PGRST116') { // PGRST116 = no rows returned
+      logError('[getUserWallet] Error querying wallet from database', {
+        error: selectError.message,
+        code: selectError.code,
+        details: selectError.details,
+        hint: selectError.hint,
+        userId
+      });
+      throw selectError;
+    }
+    
     if (existingWallet) {
+      logInfo(`[getUserWallet] Found existing wallet for user ${userId}`, { 
+        hasAddress: !!existingWallet.crypto_wallet_address,
+        address: existingWallet.crypto_wallet_address,
+        keys: Object.keys(existingWallet)
+      });
+      
+      // If wallet exists but doesn't have crypto_wallet_address, try to create one
+      if (!existingWallet.crypto_wallet_address) {
+        logInfo(`[getUserWallet] Wallet exists but no crypto_wallet_address, attempting to create via CDP...`);
+        try {
+          const { getUserWalletWithBalance } = await import('./coinbaseCdpService.js');
+          const walletData = await getUserWalletWithBalance(userId, userToken);
+          
+          if (!walletData || !walletData.crypto_wallet_address) {
+            throw new Error('CDP service did not return wallet address');
+          }
+          
+          logInfo(`[getUserWallet] Updating database with wallet address: ${walletData.crypto_wallet_address}`);
+          
+          // Update the database with the wallet address
+          const { error: updateError } = await supabase
+            .from('user_wallet')
+            .update({
+              crypto_wallet_address: walletData.crypto_wallet_address,
+              crypto_network: 'solana',
+            })
+            .eq('user_uuid', userId);
+          
+          if (updateError) {
+            logError('[getUserWallet] Failed to update wallet address in database', {
+              error: updateError.message,
+              code: updateError.code,
+              details: updateError.details,
+              userId,
+              address: walletData.crypto_wallet_address
+            });
+            throw updateError;
+          }
+          
+          logInfo(`[getUserWallet] Successfully updated wallet address in database`);
+          
+          // Return updated wallet data
+          return {
+            ...existingWallet,
+            crypto_wallet_address: walletData.crypto_wallet_address,
+            crypto_network: 'solana',
+            balance: walletData.balance,
+          };
+        } catch (cdpError) {
+          logError('[getUserWallet] Failed to create wallet address via CDP', {
+            error: cdpError.message,
+            stack: cdpError.stack,
+            userId
+          });
+          // Return wallet as-is if CDP fails
+          return existingWallet;
+        }
+      }
+      
+      // If wallet exists but has wrong network (base-sepolia), update it to solana
+      if (existingWallet.crypto_network === 'base-sepolia' || existingWallet.crypto_network === 'base') {
+        logInfo(`[getUserWallet] Updating wallet network from ${existingWallet.crypto_network} to solana...`);
+        const { error: networkUpdateError } = await supabase
+          .from('user_wallet')
+          .update({
+            crypto_network: 'solana'
+          })
+          .eq('user_uuid', userId);
+        
+        if (networkUpdateError) {
+          logWarn('[getUserWallet] Failed to update network, continuing anyway', networkUpdateError);
+        } else {
+          existingWallet.crypto_network = 'solana';
+        }
+      }
+      
       return existingWallet;
     }
     
     // Create wallet if it doesn't exist
+    logInfo(`[getUserWallet] No wallet found, creating new wallet record for user ${userId}...`);
     // Note: If using service role, RLS policies are bypassed
     // If using user token, RLS policy must allow INSERT
     const { data: newWallet, error: insertError } = await supabase
@@ -812,7 +965,8 @@ export async function getUserWallet(userId, userToken = null) {
       .insert({
         user_uuid: userId,
         user_id: userId, // Keep for backward compatibility
-        balance: 0
+        balance: 0,
+        crypto_network: 'solana'  // Default to Solana
       })
       .select()
       .single();
@@ -820,18 +974,37 @@ export async function getUserWallet(userId, userToken = null) {
     if (insertError) {
       // If it's a unique constraint error, try to fetch again
       if (insertError.code === '23505') {
-        const { data: wallet } = await supabase
+        logWarn('[getUserWallet] Unique constraint violation, fetching existing wallet...');
+        const { data: wallet, error: fetchError } = await supabase
           .from('user_wallet')
           .select('*')
           .eq('user_uuid', userId)
           .single();
+        
+        if (fetchError) {
+          logError('[getUserWallet] Error fetching wallet after constraint violation', fetchError);
+          throw fetchError;
+        }
+        
         return wallet || { user_uuid: userId, user_id: userId, balance: 0 };
       }
-      logError('Error creating user wallet', insertError);
+      logError('[getUserWallet] Error creating user wallet', {
+        error: insertError.message,
+        code: insertError.code,
+        details: insertError.details,
+        hint: insertError.hint,
+        userId
+      });
       throw insertError;
     }
     
-    return newWallet || { user_uuid: userId, user_id: userId, balance: 0 };
+    if (!newWallet) {
+      logWarn(`[getUserWallet] Wallet insert succeeded but no data returned for user ${userId}`);
+      return { user_uuid: userId, user_id: userId, balance: 0 };
+    }
+    
+    logInfo(`[getUserWallet] Successfully created wallet record for user ${userId}`);
+    return newWallet;
   } catch (err) {
     logError('Error in getUserWallet', err);
     throw err;
@@ -1075,62 +1248,6 @@ export async function getWithdrawalRequests(userId, userToken) {
   }
 }
 
-/**
- * Save Stripe Connect account ID for user
- */
-export async function saveStripeAccount(userId, stripeAccountId, status = 'pending', userToken) {
-  try {
-    if (!userToken) {
-      throw new Error('User token is required');
-    }
-    const supabase = getSupabaseClient(userToken);
-    const { error } = await supabase
-      .from('users')
-      .update({
-        stripe_account_id: stripeAccountId,
-        stripe_account_status: status
-      })
-      .eq('id', userId);
-    
-    if (error) {
-      logError('Error saving Stripe account', error);
-      throw error;
-    }
-  } catch (err) {
-    logError('Error in saveStripeAccount', err);
-    throw err;
-  }
-}
-
-/**
- * Get user's Stripe Connect account
- */
-export async function getUserStripeAccount(userId, userToken) {
-  try {
-    if (!userToken) {
-      throw new Error('User token is required');
-    }
-    const supabase = getSupabaseClient(userToken);
-    const { data, error } = await supabase
-      .from('users')
-      .select('stripe_account_id, stripe_account_status')
-      .eq('id', userId)
-      .single();
-    
-    if (error) {
-      if (error.code === 'PGRST116') {
-        return null;
-      }
-      logError('Error fetching Stripe account', error);
-      throw error;
-    }
-    
-    return data || null;
-  } catch (err) {
-    logError('Error in getUserStripeAccount', err);
-    throw err;
-  }
-}
 
 // Export service role client for direct access if needed (admin operations only)
 export default serviceRoleClient;

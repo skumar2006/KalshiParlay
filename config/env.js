@@ -33,8 +33,6 @@ export function validateEnvironment() {
     'KALSHI_API_KEY',
     'KALSHI_DEMO_API_KEY',
     'KALSHI_DEMO_PRIVATE_KEY',
-    'STRIPE_API_KEY',
-    'STRIPE_DEMO_API_KEY',
     'OPENAI_API_KEY',
   ];
 
@@ -108,17 +106,16 @@ export const ENV = {
   KALSHI_PRIVATE_KEY: getEnv('KALSHI_PRIVATE_KEY'),
   KALSHI_API_BASE_URL: getEnv('KALSHI_API_BASE_URL'), // Will be set based on environment if not provided
   
-  // Stripe configuration
-  STRIPE_API_KEY: getEnv('STRIPE_API_KEY'), // Production key (sk_live_...)
-  STRIPE_DEMO_API_KEY: getEnv('STRIPE_DEMO_API_KEY'), // Demo/test key (sk_test_...)
-  STRIPE_WEBHOOK_SECRET: getEnv('STRIPE_WEBHOOK_SECRET'), // Production webhook secret
-  STRIPE_DEMO_WEBHOOK_SECRET: getEnv('STRIPE_DEMO_WEBHOOK_SECRET'), // Demo/test webhook secret
-  
-  // Backend URL (for production checkout redirects)
+  // Backend URL
   BACKEND_BASE_URL: getEnv('BACKEND_BASE_URL'),
   
   // OpenAI configuration
   OPENAI_API_KEY: getEnv('OPENAI_API_KEY'),
+  
+  // Coinbase CDP configuration
+  COINBASE_CDP_API_KEY_ID: getEnv('COINBASE_CDP_API_KEY_ID') || getEnv('CDP_API_KEY_ID'),
+  COINBASE_CDP_API_KEY_SECRET: getEnv('COINBASE_CDP_API_KEY_SECRET') || getEnv('CDP_API_KEY_SECRET'),
+  COINBASE_CDP_WALLET_SECRET: getEnv('COINBASE_CDP_WALLET_SECRET') || getEnv('CDP_WALLET_SECRET'),
   
   // Feature flags
   KALSHI_DRY_RUN: getEnvBool('KALSHI_DRY_RUN', true),
@@ -131,18 +128,5 @@ if (!ENV.KALSHI_API_BASE_URL) {
     ? 'https://api.elections.kalshi.com/trade-api/v2'
     : 'https://demo-api.kalshi.co/trade-api/v2';
 }
-
-// Select Stripe API key based on environment (similar to Kalshi)
-ENV.STRIPE_API_KEY_SELECTED = ENV.IS_PRODUCTION
-  ? ENV.STRIPE_API_KEY
-  : (ENV.STRIPE_DEMO_API_KEY || ENV.STRIPE_API_KEY); // Fallback to production key if demo not set
-
-// Select Stripe webhook secret based on environment
-ENV.STRIPE_WEBHOOK_SECRET_SELECTED = ENV.IS_PRODUCTION
-  ? ENV.STRIPE_WEBHOOK_SECRET
-  : (ENV.STRIPE_DEMO_WEBHOOK_SECRET || ENV.STRIPE_WEBHOOK_SECRET); // Fallback to production secret if demo not set
-
-// Detect Stripe environment from selected API key (if starts with sk_live_ it's production)
-ENV.STRIPE_IS_PRODUCTION = ENV.STRIPE_API_KEY_SELECTED?.startsWith('sk_live_') || false;
 
 
