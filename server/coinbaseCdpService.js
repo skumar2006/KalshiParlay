@@ -6,6 +6,17 @@
 import { CdpClient } from '@coinbase/cdp-sdk';
 import { ENV } from '../config/env.js';
 import { logError, logInfo, logWarn } from './utils/logger.js';
+import { 
+  PublicKey, 
+  Transaction, 
+  Connection,
+} from "@solana/web3.js";
+import {
+  getAssociatedTokenAddress,
+  createTransferInstruction,
+  TOKEN_PROGRAM_ID,
+} from "@solana/spl-token";
+import { Buffer } from "buffer";
 
 let serviceRoleClient = null;
 
@@ -324,23 +335,59 @@ export async function getUserWalletWithBalance(userId, userToken = null) {
     let balance = 0;
     try {
       const { Connection, PublicKey } = await import('@solana/web3.js');
-      const connection = new Connection('https://api.mainnet-beta.solana.com');
+      const networkConfig = getSolanaNetworkConfig();
+      console.log(`[Coinbase CDP] 🔍 Fetching balance from ${networkConfig.network}`);
+      console.log(`[Coinbase CDP] RPC URL: ${networkConfig.rpcUrl}`);
+      console.log(`[Coinbase CDP] USDC Mint: ${networkConfig.usdcMint}`);
+      console.log(`[Coinbase CDP] Wallet Address: ${cryptoWalletAddress}`);
+      
+      const connection = new Connection(networkConfig.rpcUrl);
       const publicKey = new PublicKey(cryptoWalletAddress);
       
+      // First, check if wallet has SOL (to verify connection works)
+      try {
+        const solBalance = await connection.getBalance(publicKey);
+        console.log(`[Coinbase CDP] ✅ SOL balance: ${solBalance / 1e9} SOL`);
+      } catch (solError) {
+        console.error(`[Coinbase CDP] ❌ Error fetching SOL balance:`, solError.message);
+      }
+      
       // Get USDC SPL token balance
+      console.log(`[Coinbase CDP] 🔍 Fetching USDC token accounts...`);
       const tokenAccounts = await connection.getParsedTokenAccountsByOwner(publicKey, {
-        mint: new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'), // USDC mint
+        mint: new PublicKey(networkConfig.usdcMint),
       });
 
+      console.log(`[Coinbase CDP] Found ${tokenAccounts.value.length} USDC token account(s)`);
+
       if (tokenAccounts.value.length > 0) {
+        tokenAccounts.value.forEach((account, index) => {
+          const amount = account.account.data.parsed.info.tokenAmount.uiAmount;
+          console.log(`[Coinbase CDP] Token account ${index + 1}: ${amount} USDC`);
+        });
+        
         const usdcAccount = tokenAccounts.value[0];
         const amount = usdcAccount.account.data.parsed.info.tokenAmount.uiAmount;
         balance = amount || 0;
+        console.log(`[Coinbase CDP] ✅ USDC balance: ${balance} USDC`);
+      } else {
+        console.log(`[Coinbase CDP] ⚠️ No USDC token account found - wallet may need to receive USDC first to create token account`);
+        balance = 0;
       }
     } catch (balanceError) {
-      logWarn('[Coinbase CDP] Error fetching balance from Solana', balanceError);
+      console.error(`[Coinbase CDP] ===== BALANCE FETCH ERROR =====`);
+      console.error(`[Coinbase CDP] Error message:`, balanceError.message);
+      console.error(`[Coinbase CDP] Error stack:`, balanceError.stack);
+      logError('[Coinbase CDP] Error fetching balance from Solana', {
+        error: balanceError.message,
+        stack: balanceError.stack,
+        network: networkConfig?.network,
+        address: cryptoWalletAddress,
+        errorType: balanceError.constructor?.name
+      });
       // Use database balance as fallback
       balance = wallet?.balance || 0;
+      console.log(`[Coinbase CDP] Using database fallback balance: ${balance}`);
     }
 
     console.log(`[Coinbase CDP] ===== getUserWalletWithBalance SUCCESS =====`, {
@@ -357,6 +404,209 @@ export async function getUserWalletWithBalance(userId, userToken = null) {
     console.error(`[Coinbase CDP] Error message:`, err.message);
     console.error(`[Coinbase CDP] Error stack:`, err.stack);
     logError('[Coinbase CDP] Error in getUserWalletWithBalance', err);
+    throw err;
+  }
+}
+
+// Platform wallet account name (constant)
+const PLATFORM_WALLET_NAME = 'platform-main-wallet';
+
+// Solana network configuration
+function getSolanaNetworkConfig() {
+  const isProduction = ENV.IS_PRODUCTION;
+  
+  const config = {
+    rpcUrl: isProduction 
+      ? 'https://api.mainnet-beta.solana.com' 
+      : 'https://api.devnet.solana.com',
+    network: isProduction ? 'solana-mainnet' : 'solana-devnet',
+    usdcMint: isProduction
+      ? 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' // Mainnet USDC
+      : '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU' // Devnet USDC
+  };
+  
+  // Log network configuration on first call (for debugging)
+  if (!getSolanaNetworkConfig._logged) {
+    logInfo(`[Solana Network] Using ${config.network} - RPC: ${config.rpcUrl}, USDC Mint: ${config.usdcMint}`);
+    getSolanaNetworkConfig._logged = true;
+  }
+  
+  return config;
+}
+
+/**
+ * Get or create platform CDP wallet
+ * @returns {Promise<{address: string, accountName: string}>} Platform wallet address
+ */
+export async function getOrCreatePlatformWallet() {
+  const cdp = getCdpClient();
+  if (!cdp) {
+    throw new Error('Coinbase CDP is not configured');
+  }
+
+  try {
+    let account;
+    try {
+      account = await cdp.solana.createAccount({
+        name: PLATFORM_WALLET_NAME,
+      });
+      logInfo(`[Platform Wallet] Created new platform wallet: ${account.address}`);
+    } catch (createError) {
+      if (createError.statusCode === 409 || createError.errorType === 'already_exists') {
+        account = await cdp.solana.getAccount({
+          name: PLATFORM_WALLET_NAME,
+        });
+        logInfo(`[Platform Wallet] Retrieved existing platform wallet: ${account.address}`);
+      } else {
+        throw createError;
+      }
+    }
+    
+    return { 
+      address: account.address,
+      accountName: PLATFORM_WALLET_NAME
+    };
+  } catch (err) {
+    logError('[Platform Wallet] Error getting/creating platform wallet', err);
+    throw err;
+  }
+}
+
+/**
+ * Build and encode USDC transfer transaction (following CDP pattern)
+ * @param {string} fromAddress - Sender's Solana address
+ * @param {string} toAddress - Recipient's Solana address  
+ * @param {number} amountUsd - Amount in USD
+ * @returns {Promise<string>} Base64-encoded transaction
+ */
+export async function createAndEncodeUsdcTransaction(fromAddress, toAddress, amountUsd) {
+  const networkConfig = getSolanaNetworkConfig();
+  const connection = new Connection(networkConfig.rpcUrl);
+  const usdcMint = new PublicKey(networkConfig.usdcMint);
+  
+  // Convert USD to USDC (6 decimals)
+  const amountUsdc = Math.floor(amountUsd * 1000000);
+  
+  const fromPubkey = new PublicKey(fromAddress);
+  const toPubkey = new PublicKey(toAddress);
+  
+  // Get associated token accounts for USDC
+  const fromTokenAccount = await getAssociatedTokenAddress(
+    usdcMint,
+    fromPubkey
+  );
+  
+  const toTokenAccount = await getAssociatedTokenAddress(
+    usdcMint,
+    toPubkey
+  );
+  
+  // Get recent blockhash
+  const { blockhash } = await connection.getLatestBlockhash();
+  
+  // Create transaction with USDC transfer instruction
+  const transaction = new Transaction().add(
+    createTransferInstruction(
+      fromTokenAccount, // source
+      toTokenAccount,   // destination
+      fromPubkey,       // owner
+      amountUsdc,       // amount in smallest unit (6 decimals for USDC)
+      [],               // multiSigners
+      TOKEN_PROGRAM_ID
+    )
+  );
+  
+  // Set required fields (following CDP pattern)
+  transaction.recentBlockhash = blockhash;
+  transaction.feePayer = fromPubkey;
+  
+  // Serialize and encode to base64
+  const serialized = transaction.serialize({
+    requireAllSignatures: false,
+  });
+  
+  return Buffer.from(serialized).toString('base64');
+}
+
+/**
+ * Transfer USDC from platform wallet to user's CDP wallet (server-side)
+ * Uses CDP SDK to sign and send transaction
+ * @param {string} userId - User UUID
+ * @param {number} amountUsd - Amount in USD
+ * @returns {Promise<{transactionSignature: string, success: boolean}>}
+ */
+export async function transferUsdcFromPlatform(userId, amountUsd) {
+  const cdp = getCdpClient();
+  if (!cdp) {
+    throw new Error('Coinbase CDP is not configured');
+  }
+
+  try {
+    // Get user wallet
+    const userWallet = await getOrCreateUserWallet(userId);
+    
+    // Get platform wallet
+    const platformWallet = await getOrCreatePlatformWallet();
+    
+    const networkConfig = getSolanaNetworkConfig();
+    logInfo(`[Transfer] Transferring ${amountUsd} USD from platform wallet to user ${userId} on ${networkConfig.network}`);
+    
+    // Build the transaction (following CDP pattern)
+    const transaction = await createAndEncodeUsdcTransaction(
+      platformWallet.address,
+      userWallet.address,
+      amountUsd
+    );
+    
+    // Send transaction using CDP SDK (server-side equivalent of useSendSolanaTransaction)
+    const result = await cdp.solana.sendTransaction({
+      transaction,
+      solanaAccount: platformWallet.accountName, // Use account name, not address
+      network: networkConfig.network,
+    });
+    
+    logInfo(`[Transfer] Transfer successful on ${networkConfig.network}: ${result.transactionSignature}`);
+    
+    return {
+      transactionSignature: result.transactionSignature,
+      success: true
+    };
+  } catch (err) {
+    logError('[Transfer] Error transferring USDC from platform', err);
+    throw err;
+  }
+}
+
+/**
+ * Get transaction for user to sign (for parlay placement)
+ * Returns the base64 transaction that frontend will sign via CDP hooks
+ * @param {string} userId - User UUID
+ * @param {number} amountUsd - Amount in USD
+ * @returns {Promise<{transaction: string, fromAddress: string, toAddress: string, amountUsd: number}>}
+ */
+export async function getUsdcTransferTransactionForUser(userId, amountUsd) {
+  try {
+    // Get user wallet
+    const userWallet = await getOrCreateUserWallet(userId);
+    
+    // Get platform wallet
+    const platformWallet = await getOrCreatePlatformWallet();
+    
+    // Build the transaction (following CDP pattern)
+    const transaction = await createAndEncodeUsdcTransaction(
+      userWallet.address,
+      platformWallet.address,
+      amountUsd
+    );
+    
+    return {
+      transaction: transaction,
+      fromAddress: userWallet.address,
+      toAddress: platformWallet.address,
+      amountUsd: amountUsd
+    };
+  } catch (err) {
+    logError('[Transfer] Error building transfer transaction for user', err);
     throw err;
   }
 }

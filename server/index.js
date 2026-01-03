@@ -38,6 +38,7 @@ import { checkParlayStatus, checkAllActiveParlays, checkMarketOutcome } from "./
 import { generateParlayQuote } from "./aiQuoteService.js";
 import { calculateHedgingStrategy } from "./hedgingService.js";
 import { executeHedgingStrategy } from "./kalshiTradeClient.js";
+import { transferUsdcFromPlatform, getUsdcTransferTransactionForUser } from "./coinbaseCdpService.js";
 import { ENV, validateEnvironment } from "../config/env.js";
 import { CONFIG, ERROR_MESSAGES, HTTP_STATUS } from "../config/constants.js";
 import { logError, logInfo, logSection, logWarn, logDebug } from "./utils/logger.js";
@@ -750,15 +751,25 @@ app.post("/api/claim-winnings/:sessionId", async (req, res) => {
       });
     }
     
+    const winningsAmount = purchase.claimable_amount;
+    
+    // Transfer USDC from platform CDP wallet to user's CDP wallet (server-side)
+    try {
+      logInfo(`[Transfer] Initiating USDC transfer from platform wallet to user ${purchase.user_id}...`);
+      const transferResult = await transferUsdcFromPlatform(purchase.user_id, winningsAmount);
+      logInfo(`[Transfer] ✅ Transfer successful: ${transferResult.transactionSignature}`);
+    } catch (transferError) {
+      logError(`[Transfer] ❌ Transfer failed:`, transferError);
+      return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+        error: `Failed to transfer winnings: ${transferError.message}` 
+      });
+    }
+    
     // Mark as claimed first (idempotent)
     await claimParlayWinnings(sessionId, token);
     
-    const winningsAmount = purchase.claimable_amount;
-    
-    // Add winnings to user's wallet balance (money stays in platform account)
+    // Update database balances (for tracking)
     await addUserBalance(purchase.user_id, winningsAmount, token);
-    
-    // Deduct from liquidity pool (platform pays winnings from pool)
     await updateLiquidityPoolBalance(-winningsAmount);
     
     // Get updated balances for logging
@@ -768,7 +779,7 @@ app.post("/api/claim-winnings/:sessionId", async (req, res) => {
     logInfo(`Winnings claimed: User ${purchase.user_id}, Amount: $${winningsAmount.toFixed(2)}, Session: ${sessionId}`);
     logInfo(`User wallet balance: $${parseFloat(walletAfter.balance || 0).toFixed(2)}`);
     logInfo(`Liquidity pool balance: $${parseFloat(poolData.balance || 0).toFixed(2)}`);
-    logInfo(`Note: Winnings added to wallet, deducted from liquidity pool. Money stays in platform account.`);
+    logInfo(`Note: USDC transferred from platform wallet to user's CDP wallet on-chain.`);
     
     res.json({ 
       success: true, 
@@ -1266,6 +1277,48 @@ if (ENV.NODE_ENV === 'development' || ENV.NODE_ENV !== 'production') {
 
   logInfo("🧪 Testing endpoints enabled (development mode)");
 }
+
+/**
+ * Get USDC transfer transaction for user to sign (for parlay placement)
+ * @route POST /api/get-transfer-transaction
+ * @param {string} userId - User identifier
+ * @param {number} amountUsd - Amount in USD to transfer
+ * @returns {Object} Transaction data for frontend to sign
+ */
+app.post("/api/get-transfer-transaction", async (req, res) => {
+  const { userId, amountUsd } = req.body;
+  
+  if (!userId) {
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+      error: ERROR_MESSAGES.PAYMENT.USER_ID_REQUIRED 
+    });
+  }
+  
+  if (!amountUsd || amountUsd <= 0) {
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({ 
+      error: "Invalid amount" 
+    });
+  }
+  
+  try {
+    const transferData = await getUsdcTransferTransactionForUser(userId, amountUsd);
+    
+    res.json({
+      success: true,
+      transaction: transferData.transaction,
+      fromAddress: transferData.fromAddress,
+      toAddress: transferData.toAddress,
+      amountUsd: transferData.amountUsd,
+      message: "Sign this transaction to transfer funds to platform wallet"
+    });
+  } catch (err) {
+    logError("Error getting transfer transaction", err);
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ 
+      error: "Failed to get transfer transaction", 
+      details: err.message 
+    });
+  }
+});
 
 /**
  * Generate AI-powered quote for a parlay
